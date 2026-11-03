@@ -571,8 +571,14 @@ export function App() {
   const [loginSuccess, setLoginSuccess] = useState(false);
   const onLoginSuccess = () => {
     setLoginSuccess(true);
-    const from = view;
-    window.setTimeout(() => { setLoginSuccess(false); if (from === "account") navigate("store"); }, 1500);
+    window.setTimeout(() => {
+      setLoginSuccess(false);
+      // Read the live route here: the view captured when sign-in started
+      // is stale by the time the popup resolves (the app re-rendered on
+      // the auth-state change), so the old guard never navigated.
+      const head = window.location.hash.replace(/^#\/?/, "").split("/")[0];
+      if (head === "account") navigate("store");
+    }, 1500);
   };
   const [userDoc, setUserDoc] = useState<UserDoc | null>(null);
   const [cat, setCat] = useState("all");
@@ -623,7 +629,7 @@ export function App() {
     return unsub;
   }, [fbUser]);
 
-  const { categories, products, error: catalogError } = useCatalog();
+  const { categories, products, loading: catalogLoading, error: catalogError } = useCatalog();
   const { data: settings } = useSettingsDoc();
   const content = parseContent(settings.contentJson);
   const isStaff = userDoc ? isStaffRole(userDoc.role) : false;
@@ -767,7 +773,12 @@ export function App() {
               </article>
             ))}
           </div>
-          {filtered.length === 0 && !catalogError && (
+          {catalogLoading && filtered.length === 0 && (
+            <div className="card" style={{ padding: 16, marginTop: 14, textAlign: "center" }}>
+              <p>{tr(lang, "Loading the menu…", "মেনু লোড হচ্ছে…")}</p>
+            </div>
+          )}
+          {filtered.length === 0 && !catalogError && !catalogLoading && (
             <div className="card" style={{ padding: 16, marginTop: 14, textAlign: "center" }}>
               <p>{isFirebaseConfigured
                 ? tr(lang, "The menu is empty right now.", "মেনু এখন খালি।")

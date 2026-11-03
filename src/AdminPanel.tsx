@@ -943,7 +943,13 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
     );
   }
   if (!userDoc) {
-    return <p className="muted">{tr(lang, "Setting up your account…", "আপনার অ্যাকাউন্ট তৈরি হচ্ছে…")}</p>;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14, padding: "48px 16px", textAlign: "center" }}>
+        <div className="logo-tile" style={{ width: 64, height: 64 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></div>
+        <div className="spinner" aria-hidden="true" />
+        <p className="muted">{tr(lang, "Setting up your account…", "আপনার অ্যাকাউন্ট তৈরি হচ্ছে…")}</p>
+      </div>
+    );
   }
   // A signed-in account without a staff role never sees this panel:
   // the customer app sends it back to the shop silently, so this
