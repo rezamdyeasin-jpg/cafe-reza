@@ -21,7 +21,7 @@ jobs:
             SRC="$(find extracted -mindepth 1 -maxdepth 1)"
           fi
           echo "Using source dir: $SRC"
-          find . -mindepth 1 ! -name '.git' ! -name 'extracted' -exec rm -rf {} +
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name 'extracted' -exec rm -rf {} +
           cp -a "$SRC"/. .
           rm -rf extracted
           ls -la
