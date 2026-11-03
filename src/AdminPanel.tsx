@@ -619,6 +619,7 @@ const ADMIN_TABS: AdminTabDef[] = [
   { id: "support", en: "Support & Reviews", bn: "সাপোর্ট ও রিভিউ", roles: ["admin", "manager", "cashier"] },
   { id: "settings", en: "Settings", bn: "সেটিংস", roles: ["admin"], ownerOnly: true },
   { id: "firebase", en: "Firebase & Launch", bn: "Firebase ও লঞ্চ", roles: ["admin"], ownerOnly: true },
+  { id: "apps", en: "Apps", bn: "অ্যাপস", roles: ["admin", "manager", "cashier", "kitchen", "waiter", "delivery", "inventory"] },
 ];
 
 function PeriodButtons({ period, setPeriod, lang }: { period: Period; setPeriod: (p: Period) => void; lang: Lang }) {
@@ -880,6 +881,48 @@ function OwnerTab({ userDoc, orders, products, lang, onGoTab }: { userDoc: UserD
   );
 }
 
+// Apps: download/install options for BOTH apps on every device.
+// Desktop + Android install with one tap (beforeinstallprompt); iPhone
+// has no install button in Safari, so it is Share -> Add to Home Screen.
+// Only one InstallAppCard is mounted at a time, so the install prompt
+// always targets the selected app's manifest.
+function AppsTab({ lang }: { lang: Lang }) {
+  const [app, setApp] = useState<"customer" | "admin">("customer");
+  const startUrl = app === "admin" ? "https://cafe-reza.web.app/#/admin" : "https://cafe-reza.web.app/#/";
+  return (
+    <div>
+      <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Apps", "অ্যাপস")}</h3>
+      <p className="small muted">{tr(lang, "Both apps are this same website — same login, same data, same features. Pick an app, then install it on any device: Desktop, Android or iPhone.", "দুটো অ্যাপই এই একই ওয়েবসাইট — একই লগইন, একই ডেটা, একই সুবিধা। অ্যাপ বেছে নিন, তারপর যেকোনো ডিভাইসে ইনস্টল করুন: ডেস্কটপ, Android বা iPhone।")}</p>
+      <div className="row" style={{ marginTop: 8 }}>
+        <button className={`chip ${app === "customer" ? "chip-on" : ""}`} onClick={() => setApp("customer")}>{tr(lang, "Customer app — Café Reza", "কাস্টমার অ্যাপ — ক্যাফে রেজা")}</button>
+        <button className={`chip ${app === "admin" ? "chip-on" : ""}`} onClick={() => setApp("admin")}>{tr(lang, "Admin app — Café Reza Admin", "অ্যাডমিন অ্যাপ — ক্যাফে রেজা অ্যাডমিন")}</button>
+      </div>
+      <InstallAppCard variant={app} lang={lang} />
+      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginTop: 12 }}>
+        <div className="card" style={{ padding: 12 }}>
+          <b>🖥️ {tr(lang, "Desktop", "ডেস্কটপ")}</b>
+          <p className="small muted">Windows / Mac — Chrome, Edge</p>
+          <p className="small">{tr(lang, "Open the app, then press Install above — or the browser menu (⋮) → Install.", "অ্যাপটি খুলে উপরের Install বোতামে চাপুন — অথবা ব্রাউজার মেনু (⋮) → Install।")}</p>
+          <p><a href={startUrl} target="_blank" rel="noreferrer">{tr(lang, "Open the app", "অ্যাপটি খুলুন")}</a></p>
+        </div>
+        <div className="card" style={{ padding: 12 }}>
+          <b>🤖 {tr(lang, "Android", "Android")}</b>
+          <p className="small muted">Chrome</p>
+          <p className="small">{tr(lang, "Open the app, then press Install above — or Chrome menu (⋮) → Install app / Add to Home screen.", "অ্যাপটি খুলে উপরের Install বোতামে চাপুন — অথবা Chrome মেনু (⋮) → Install app / Add to Home screen।")}</p>
+          <p><a href={startUrl} target="_blank" rel="noreferrer">{tr(lang, "Open the app", "অ্যাপটি খুলুন")}</a></p>
+        </div>
+        <div className="card" style={{ padding: 12 }}>
+          <b>🍎 {tr(lang, "iPhone (Apple)", "iPhone (Apple)")}</b>
+          <p className="small muted">Safari</p>
+          <p className="small">{tr(lang, "iPhone has no install button in Safari: open the app in Safari, tap Share, then Add to Home Screen.", "iPhone-এ Safari-তে সরাসরি Install বোতাম হয় না: Safari-তে অ্যাপটি খুলে Share চেপে Add to Home Screen করুন।")}</p>
+          <p><a href={startUrl} target="_blank" rel="noreferrer">{tr(lang, "Open the app in Safari", "Safari-তে অ্যাপটি খুলুন")}</a></p>
+        </div>
+      </div>
+      <p className="small muted" style={{ marginTop: 12 }}>{tr(lang, "These are web apps (PWA), not Play Store / App Store downloads — no store account needed. Native store apps come later.", "এগুলো ওয়েব অ্যাপ (PWA), Play Store / App Store ডাউনলোড নয় — স্টোর অ্যাকাউন্ট লাগে না। নেটিভ স্টোর অ্যাপ পরে আসবে।")}</p>
+    </div>
+  );
+}
+
 export function AdminPanel({ fbUser, userDoc, settings, categories, products, lang, onBack, onSeed, seedBusy, seedMsg, signInCard }: {
   fbUser: User | null; userDoc: UserDoc | null; settings: Settings; categories: Category[]; products: Product[];
   lang: Lang; onBack: () => void; onSeed: () => void; seedBusy: boolean; seedMsg: string; signInCard: React.ReactNode;
@@ -983,6 +1026,7 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
         {activeTab === "support" && <SupportTab userDoc={userDoc} products={products} lang={lang} />}
         {activeTab === "inventory" && <InventoryTab userDoc={userDoc} lang={lang} />}
         {activeTab === "firebase" && <FirebaseTab userDoc={userDoc} lang={lang} onSeed={onSeed} seedBusy={seedBusy} seedMsg={seedMsg} />}
+        {activeTab === "apps" && <AppsTab lang={lang} />}
       </div>
     </div>
   );
