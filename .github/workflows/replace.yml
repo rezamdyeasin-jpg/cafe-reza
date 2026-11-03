@@ -1,0 +1,35 @@
+name: Replace with Firebase code
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  replace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replace repo contents with the uploaded zip
+        run: |
+          set -e
+          ls -la
+          test -f cafe-reza-firebase.zip
+          mkdir -p extracted
+          unzip -o cafe-reza-firebase.zip -d extracted
+          ls -R extracted | head -n 200
+          SRC=extracted
+          if [ "$(find extracted -mindepth 1 -maxdepth 1 | wc -l)" = "1" ] && [ -d "$(find extracted -mindepth 1 -maxdepth 1)" ]; then
+            SRC="$(find extracted -mindepth 1 -maxdepth 1)"
+          fi
+          echo "Using source dir: $SRC"
+          find . -mindepth 1 ! -name '.git' ! -name 'extracted' -exec rm -rf {} +
+          cp -a "$SRC"/. .
+          rm -rf extracted
+          ls -la
+      - name: Commit the replaced contents
+        run: |
+          git config user.name "rezamdyeasin-jpg"
+          git config user.email "rezamdyeasin-jpg@users.noreply.github.com"
+          git add -A
+          git status --short
+          git commit -m "Replace with Firebase standalone code" || echo "Nothing to commit"
+          git push
