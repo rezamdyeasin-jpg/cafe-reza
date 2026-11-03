@@ -1,0 +1,26 @@
+# Dependencies and build output — never upload these to GitHub.
+node_modules/
+client/dist/
+client/dist-cvm/
+.space-build/
+.space-build-cvm/
+.bun-cache/
+
+# Local secrets and the live database — never commit these.
+# The database (app.db) holds real orders, accounts and stock. It stays
+# in the Muse artifact runtime only; a GitHub/Vercel copy must never
+# receive it, and no hosting copy can read it.
+.env
+.env.local
+.env.*.local
+app.db
+app.db-shm
+app.db-wal
+
+# Build / audit artefacts and OS files.
+audits/
+*.log
+.DS_Store
+
+# Safe to commit: .env.example (names only, no values), vercel.json,
+# DEPLOY.md, firebase.json, firestore.rules, storage.rules.

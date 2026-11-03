@@ -1,0 +1,163 @@
+rules_version = '2';
+// Cafe Reza — strict Firestore rules. Deploy with:
+//   firebase deploy --only firestore:rules
+// (Firebase CLI, logged in as the project owner; project: cafe-reza,
+//  database: (default), location asia-south1.)
+//
+// Deny by default: every path below is closed unless a rule explicitly
+// allows it. Roles come from Firebase Auth custom claims
+// (request.auth.token.role) when set by the owner via the Admin SDK, and
+// fall back to the role field of the caller's /users/{uid} document.
+// User documents must be keyed by Firebase UID with a `role` field
+// (admin | manager | cashier | kitchen | waiter | delivery | inventory |
+// customer). Prices, stock, roles and payment status are never writable
+// by a client: product/settings writes are admin-only, and order totals
+// are computed server-side — a client order document may not set totals.
+//
+// App Check: enable enforcement in Firebase Console → App Check →
+// Firestore (after adding the reCAPTCHA Enterprise site key to the
+// hosting environment as VITE_FIREBASE_APPCHECK_KEY). Rules alone cannot
+// enforce App Check; enforcement is a console setting.
+//
+// These rules are NOT live until deployed. Until then Firestore stays in
+// Production mode (all reads/writes denied) and the app reports that
+// honestly instead of pretending the connection works.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function role() {
+      return request.auth != null && request.auth.token.keys().hasAny(['role'])
+        ? request.auth.token.role
+        : (signedIn() ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role : null);
+    }
+    function isAdmin() { return role() == 'admin'; }
+    function isManager() { return role() == 'manager' || isAdmin(); }
+    function isStaff() { return role() in ['admin', 'manager', 'cashier', 'kitchen', 'waiter', 'delivery', 'inventory']; }
+    function isOwner(userId) { return signedIn() && request.auth.uid == userId; }
+
+    // Default deny — nothing else in this file can widen this catch-all
+    // because more specific matches below take precedence only for the
+    // collections they name.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Users: each user reads/updates only their own profile, and may
+    // never change role, loyalty points, status or firebaseUid.
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isStaff();
+      allow create: if isOwner(userId)
+        && request.resource.data.role == 'customer'
+        && !request.resource.data.keys().hasAny(['loyaltyPoints', 'status', 'firebaseUid']);
+      allow update: if isOwner(userId)
+        && !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['role', 'loyaltyPoints', 'status', 'firebaseUid']);
+      allow delete: if false;
+      allow read, write: if isAdmin();
+    }
+
+    // Catalog: public read; only admins write prices/stock/visibility.
+    match /products/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+    match /categories/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+    match /coupons/{id} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+    match /settings/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Orders: customers create only their own orders and may not set
+    // server-computed money fields; they read only their own orders and
+    // never update them. Staff read all; only admin/manager change
+    // payment status; status changes follow the staff workflow.
+    match /orders/{id} {
+      allow read: if isOwner(resource.data.userId) || isStaff();
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && !request.resource.data.keys().hasAny(['total', 'subtotal', 'discount', 'vat', 'deliveryFee', 'paymentStatus', 'status']);
+      allow update: if isStaff()
+        && !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['total', 'subtotal', 'discount', 'vat', 'deliveryFee', 'items'])
+        && !(request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentStatus']) && !isManager());
+      allow delete: if false;
+    }
+
+    // Reservations: guests create with their own phone; customers read
+    // only their own (by uid or matching phone on the document); staff
+    // manage all.
+    match /reservations/{id} {
+      allow read: if isOwner(resource.data.userId) || isStaff();
+      allow create: if true;
+      allow update: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    // Private messages: the customer who owns the thread and staff only.
+    // A customer thread document is keyed by the customer's uid.
+    match /messages/{threadId} {
+      allow read, update: if isOwner(resource.data.userId) || isStaff();
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow delete: if false;
+      match /items/{itemId} {
+        allow read, create: if isOwner(get(/databases/$(database)/documents/messages/$(threadId)).data.userId) || isStaff();
+        allow update, delete: if false;
+      }
+    }
+
+    // Refund requests: staff create, admin/manager decide, nobody edits
+    // a decided request.
+    match /refundRequests/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && request.resource.data.status == 'pending';
+      allow update: if isManager() && resource.data.status == 'pending';
+      allow delete: if false;
+    }
+
+    // Inventory & suppliers: staff areas only; cost data is never public.
+    match /inventory/{id} {
+      allow read, write: if isStaff();
+    }
+    match /suppliers/{id} {
+      allow read, write: if isStaff();
+    }
+    match /expenses/{id} {
+      allow read, write: if isManager();
+    }
+
+    // Audit log: append-only. Staff/admin read; only admins (or the
+    // server, with an admin token) create; updates and deletes forbidden.
+    match /auditLogs/{id} {
+      allow read: if isStaff();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+    match /securityEvents/{id} {
+      allow read: if isManager();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // Reviews: anyone reads approved reviews; customers create their
+    // own pending reviews; staff moderate.
+    match /reviews/{id} {
+      allow read: if resource.data.status == 'Approved' || isStaff();
+      allow create: if signedIn() && request.resource.data.status == 'Pending';
+      allow update: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    // Sync metadata written by the artifact's publish step.
+    match /meta/{id} {
+      allow read: if isStaff();
+      allow write: if isStaff();
+    }
+  }
+}

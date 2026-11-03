@@ -1,0 +1,33 @@
+rules_version = '2';
+// Cafe Reza — strict Storage rules. Deploy with:
+//   firebase deploy --only storage
+// Deny by default. Product images: public read, staff-only write,
+// images only, 5 MB max. Private user files: owner only. Everything
+// else: denied. Not live until deployed; see firestore.rules header.
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() { return request.auth != null; }
+    function role() {
+      return request.auth != null && request.auth.token.keys().hasAny(['role'])
+        ? request.auth.token.role
+        : null;
+    }
+    function isStaff() { return role() in ['admin', 'manager', 'cashier', 'kitchen', 'waiter', 'delivery', 'inventory']; }
+
+    match /products/{file} {
+      allow read: if true;
+      allow write: if isStaff()
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size < 5 * 1024 * 1024;
+      allow delete: if role() == 'admin';
+    }
+    match /users/{userId}/{file} {
+      allow read, write: if signedIn() && request.auth.uid == userId
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size < 5 * 1024 * 1024;
+    }
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
