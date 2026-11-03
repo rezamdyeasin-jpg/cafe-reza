@@ -928,10 +928,15 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
   lang: Lang; onBack: () => void; onSeed: () => void; seedBusy: boolean; seedMsg: string; signInCard: React.ReactNode;
 }) {
   const [tab, setTab] = useState("dashboard");
+  const [showAlerts, setShowAlerts] = useState(false);
   const firestore = getDb();
-  const { data: orders } = useLive<Order>(() => (firestore && userDoc && isStaffRole(userDoc.role) ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(500)) : null), orderFromDoc);
-  const { data: invItems } = useLive(() => (firestore && userDoc && isStaffRole(userDoc.role) ? query(collection(firestore, "inventory"), orderBy("name"), limit(200)) : null),
-    (id, d) => ({ id, name: String(d.name ?? ""), quantity: Number(d.quantity ?? 0), lowAt: Number(d.lowAt ?? 1) }));
+  // The panel mounts while the user doc is still loading (fresh sign-in),
+  // so these queries must re-subscribe once staff is known — the old
+  // empty-deps effect kept the first render's "no query" forever.
+  const staffReady = !!userDoc && isStaffRole(userDoc.role);
+  const { data: orders } = useLive<Order>(() => (firestore && staffReady ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(500)) : null), orderFromDoc, [staffReady]);
+  const { data: invItems } = useLive(() => (firestore && staffReady ? query(collection(firestore, "inventory"), orderBy("name"), limit(200)) : null),
+    (id, d) => ({ id, name: String(d.name ?? ""), quantity: Number(d.quantity ?? 0), lowAt: Number(d.lowAt ?? 1) }), [staffReady]);
 
   if (!fbUser) {
     return (
@@ -967,7 +972,6 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
     todayOrders.forEach((o) => o.items.forEach((it) => { const cur = m.get(it.productId) ?? { name: it.name, qty: 0 }; cur.qty += it.qty; m.set(it.productId, cur); }));
     return [...m.values()].sort((a, b) => b.qty - a.qty)[0] ?? null;
   })();
-  const [showAlerts, setShowAlerts] = useState(false);
   const pendingOrders = orders.filter((o) => o.status === "Pending").length;
   const pendingVerification = orders.filter((o) => o.paymentStatus === "Pending verification").length;
   const lowInvCount = invItems.filter((it) => it.quantity <= it.lowAt).length;

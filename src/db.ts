@@ -71,7 +71,7 @@ export const isStaffRole = (role: string | undefined | null) => !!role && STAFF_
 export const ORDER_STATUSES = ["Pending", "Confirmed", "Preparing", "Ready", "Out for Delivery", "Delivered", "Completed", "Cancelled", "Refunded"];
 export const PAYMENTS = ["Cash on Delivery", "Cash at Counter", "Cash", "bKash", "Nagad", "Rocket", "Bank Transfer"];
 
-export function useLive<T>(build: () => Query<DocumentData> | null, map: (id: string, d: DocumentData) => T): { data: T[]; loading: boolean; error: string } {
+export function useLive<T>(build: () => Query<DocumentData> | null, map: (id: string, d: DocumentData) => T, deps: unknown[] = []): { data: T[]; loading: boolean; error: string } {
   const [data, setData] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -83,7 +83,7 @@ export function useLive<T>(build: () => Query<DocumentData> | null, map: (id: st
       (e) => { setError(e.message); setLoading(false); });
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, deps);
   return { data, loading, error };
 }
 

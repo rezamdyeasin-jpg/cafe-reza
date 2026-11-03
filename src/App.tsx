@@ -6,7 +6,7 @@
 // Firestore documents once, from the admin panel.
 // Sign-in is Google, Facebook and phone number only. There is no
 // email/password form and no email-verification step.
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { User } from "firebase/auth";
 import {
   addDoc, collection, doc, getFirestore, onSnapshot, orderBy, query, serverTimestamp,
@@ -563,6 +563,30 @@ function InfoView({ settings, lang }: { settings: Settings; lang: Lang }) {
   );
 }
 
+// If the admin panel throws while rendering, React unmounts the whole
+// page (black screen). Catch it here instead: show the error so it can
+// be fixed, with a way back to the shop.
+class PanelErrorBoundary extends Component<{ children: ReactNode; lang: Lang; onBack: () => void }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="card" style={{ padding: 20, marginTop: 14 }}>
+          <h2 className="serif" style={{ fontSize: 20 }}>{tr(this.props.lang, "The admin panel could not open", "অ্যাডমিন প্যানেল খুলতে পারেনি")}</h2>
+          <p className="small" style={{ marginTop: 8 }}>{tr(this.props.lang, "Something went wrong while opening the panel. The error is shown below so it can be fixed.", "প্যানেল খুলতে গিয়ে সমস্যা হয়েছে। নিচে ভুলের বিবরণ দেখা যাচ্ছে, যাতে ঠিক করা যায়।")}</p>
+          <p className="small" role="alert" style={{ marginTop: 8, color: "var(--bad)", wordBreak: "break-word" }}>{this.state.error.message}</p>
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className="btn-gold" onClick={() => window.location.reload()}>{tr(this.props.lang, "Try again", "আবার চেষ্টা করুন")}</button>
+            <button className="btn-ghost" onClick={this.props.onBack}>{tr(this.props.lang, "Back to shop", "দোকানে ফিরুন")}</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export function App() {
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("cr_lang") === "en" ? "en" : "bn"));
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -706,7 +730,9 @@ export function App() {
 
       {view === "admin" ? (
         <main className="wrap" style={{ marginTop: 14 }}>
-          <AdminPanel fbUser={fbUser} userDoc={userDoc} settings={settings} categories={categories} products={products} lang={lang} onBack={() => navigate("store")} onSeed={runSeed} seedBusy={seedBusy} seedMsg={seedMsg} signInCard={<SignInCard lang={lang} onSignedIn={onLoginSuccess} />} />
+          <PanelErrorBoundary lang={lang} onBack={() => navigate("store")}>
+            <AdminPanel fbUser={fbUser} userDoc={userDoc} settings={settings} categories={categories} products={products} lang={lang} onBack={() => navigate("store")} onSeed={runSeed} seedBusy={seedBusy} seedMsg={seedMsg} signInCard={<SignInCard lang={lang} onSignedIn={onLoginSuccess} />} />
+          </PanelErrorBoundary>
         </main>
       ) : view === "track" ? (
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><TrackView key={fbUser?.uid ?? "guest"} fbUser={fbUser} lang={lang} /></main>
