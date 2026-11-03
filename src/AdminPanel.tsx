@@ -509,16 +509,36 @@ function InventoryTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
   const { data: items } = useLive(() => (firestore ? query(collection(firestore, "inventory"), orderBy("name")) : null),
     (id, d) => ({ id, name: String(d.name ?? ""), category: String(d.category ?? ""), unit: String(d.unit ?? "kg"), quantity: Number(d.quantity ?? 0), lowAt: Number(d.lowAt ?? 1), costPerUnit: Number(d.costPerUnit ?? 0), expiry: String(d.expiry ?? ""), supplier: String(d.supplier ?? "") }));
   const [f, setF] = useState({ name: "", category: "Other ingredients", unit: "kg", quantity: 0, lowAt: 1, costPerUnit: 0, expiry: "", supplier: "" });
+  const [filter, setFilter] = useState<"all" | "low" | "expiring">("all");
   const save = async (e: FormEvent) => {
     e.preventDefault();
     if (!firestore) return;
     await addDoc(collection(firestore, "inventory"), { ...f, quantity: Number(f.quantity), lowAt: Number(f.lowAt), costPerUnit: Number(f.costPerUnit) });
     setF({ name: "", category: "Other ingredients", unit: "kg", quantity: 0, lowAt: 1, costPerUnit: 0, expiry: "", supplier: "" });
   };
+  const lowItems = items.filter((it) => it.quantity <= it.lowAt);
+  const stockValue = items.reduce((acc, it) => acc + it.quantity * it.costPerUnit, 0);
+  const expiring = items.filter((it) => {
+    if (!it.expiry) return false;
+    const t = new Date(`${it.expiry}T00:00:00`).getTime();
+    return !Number.isNaN(t) && t <= Date.now() + 7 * 86400000;
+  });
+  const shown = filter === "low" ? lowItems : filter === "expiring" ? expiring : items;
   return (
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Inventory", "ইনভেন্টরি")}</h3>
       {!canManage && <p className="small muted">{tr(lang, "Expenses are manager/admin only; stock viewing is open to all staff.", "খরচ শুধু ম্যানেজার/অ্যাডমিনের; স্টক সব স্টাফ দেখতে পারেন।")}</p>}
+      <div className="grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginTop: 10 }}>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{items.length}</b><p className="small">{tr(lang, "Total items", "মোট আইটেম")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{lowItems.length}</b><p className="small">{tr(lang, "Low stock", "কম স্টক")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(stockValue)}</b><p className="small">{tr(lang, "Stock value", "স্টকের মূল্য")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{expiring.length}</b><p className="small">{tr(lang, "Expiring within 7 days", "৭ দিনে মেয়াদ শেষ")}</p></div>
+      </div>
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className={`chip ${filter === "all" ? "chip-on" : ""}`} onClick={() => setFilter("all")}>{tr(lang, "All", "সব")}</button>
+        <button className={`chip ${filter === "low" ? "chip-on" : ""}`} onClick={() => setFilter("low")}>{tr(lang, "Low stock", "কম স্টক")}</button>
+        <button className={`chip ${filter === "expiring" ? "chip-on" : ""}`} onClick={() => setFilter("expiring")}>{tr(lang, "Expiring soon", "মেয়াদ শেষের কাছাকাছি")}</button>
+      </div>
       <form onSubmit={(e) => void save(e)} className="card" style={{ padding: 14, marginTop: 10 }}>
         <label>{tr(lang, "Item name", "আইটেমের নাম")}<input aria-label="Inventory item name" required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
         <div className="row">
@@ -526,11 +546,18 @@ function InventoryTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
           <label style={{ flex: 1 }}>{tr(lang, "Unit", "একক")}<input aria-label="Unit" value={f.unit} onChange={(e) => setF({ ...f, unit: e.target.value })} /></label>
           <label style={{ flex: 1 }}>{tr(lang, "Low-stock at", "কম স্টক সীমা")}<input aria-label="Low stock at" type="number" value={f.lowAt} onChange={(e) => setF({ ...f, lowAt: Number(e.target.value) })} /></label>
         </div>
+        <div className="row">
+          <label style={{ flex: 1 }}>{tr(lang, "Cost per unit (৳)", "প্রতি একক খরচ (৳)")}<input aria-label="Cost per unit" type="number" value={f.costPerUnit} onChange={(e) => setF({ ...f, costPerUnit: Number(e.target.value) })} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Supplier", "সরবরাহকারী")}<input aria-label="Supplier" value={f.supplier} onChange={(e) => setF({ ...f, supplier: e.target.value })} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Expiry (date)", "মেয়াদ (তারিখ)")}<input aria-label="Expiry date" type="date" value={f.expiry} onChange={(e) => setF({ ...f, expiry: e.target.value })} /></label>
+        </div>
         <button className="btn-gold" type="submit">{tr(lang, "Add item", "আইটেম যোগ করুন")}</button>
       </form>
-      {items.map((it) => (
+      {shown.length === 0 && <p className="muted small" style={{ marginTop: 10 }}>{tr(lang, "No items in this view.", "এই ভিউতে কোনো আইটেম নেই।")}</p>}
+      {shown.map((it) => (
         <div key={it.id} className="card" style={{ padding: 10, marginTop: 8 }}>
           <b>{it.name}</b> — {it.quantity} {it.unit} {it.quantity <= it.lowAt && <span style={{ color: "var(--bad)" }}>• {tr(lang, "LOW", "কম")}</span>}
+          <p className="small muted" style={{ margin: "2px 0" }}>{it.category}{it.supplier ? ` • ${it.supplier}` : ""}{it.expiry ? ` • ${tr(lang, "expiry", "মেয়াদ")} ${it.expiry}` : ""} • {tr(lang, "cost", "খরচ")} {tk(it.costPerUnit)}/{it.unit} • {tr(lang, "value", "মূল্য")} {tk(it.quantity * it.costPerUnit)}</p>
           <div className="row" style={{ marginTop: 6 }}>
             <button className="chip" onClick={() => { if (firestore) void updateDoc(doc(firestore, "inventory", it.id), { quantity: it.quantity + 1 }); }}>+1</button>
             <button className="chip" onClick={() => { if (firestore) void updateDoc(doc(firestore, "inventory", it.id), { quantity: Math.max(0, it.quantity - 1) }); }}>−1</button>
@@ -860,6 +887,8 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
   const [tab, setTab] = useState("dashboard");
   const firestore = getDb();
   const { data: orders } = useLive<Order>(() => (firestore && userDoc && isStaffRole(userDoc.role) ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(500)) : null), orderFromDoc);
+  const { data: invItems } = useLive(() => (firestore && userDoc && isStaffRole(userDoc.role) ? query(collection(firestore, "inventory"), orderBy("name"), limit(200)) : null),
+    (id, d) => ({ id, name: String(d.name ?? ""), quantity: Number(d.quantity ?? 0), lowAt: Number(d.lowAt ?? 1) }));
 
   if (!fbUser) {
     return (
@@ -889,11 +918,27 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
     todayOrders.forEach((o) => o.items.forEach((it) => { const cur = m.get(it.productId) ?? { name: it.name, qty: 0 }; cur.qty += it.qty; m.set(it.productId, cur); }));
     return [...m.values()].sort((a, b) => b.qty - a.qty)[0] ?? null;
   })();
+  const [showAlerts, setShowAlerts] = useState(false);
+  const pendingOrders = orders.filter((o) => o.status === "Pending").length;
+  const pendingVerification = orders.filter((o) => o.paymentStatus === "Pending verification").length;
+  const lowInvCount = invItems.filter((it) => it.quantity <= it.lowAt).length;
+  const alertTotal = pendingOrders + pendingVerification + lowInvCount + lowStock.length;
   return (
     <div className="admin-shell">
       <nav className="admin-nav" aria-label="Admin">
         <p className="serif" style={{ fontSize: 18, margin: 0 }}>{tr(lang, "Admin panel", "অ্যাডমিন প্যানেল")}</p>
         <p className="small muted" style={{ margin: 0 }}>{userDoc.name} • {owner ? tr(lang, "Super Admin (Owner)", "সুপার অ্যাডমিন (মালিক)") : userDoc.role}</p>
+        <button className="chip" onClick={() => setShowAlerts(!showAlerts)}>🔔 {tr(lang, "Alerts", "সতর্কতা")}{alertTotal > 0 ? ` (${alertTotal})` : ""}</button>
+        {showAlerts && (
+          <div className="card" style={{ padding: 10, marginTop: 6 }}>
+            {alertTotal === 0 ? <p className="small muted" style={{ margin: 0 }}>{tr(lang, "No alerts — everything is fine.", "কোনো সতর্কতা নেই — সব ঠিক আছে।")}</p> : <>
+              <p className="small" style={{ margin: 0 }}>• {pendingOrders} {tr(lang, "pending orders", "টি অপেক্ষমাণ অর্ডার")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("orders"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
+              <p className="small" style={{ margin: 0 }}>• {pendingVerification} {tr(lang, "payments awaiting verification", "টি পেমেন্ট যাচাইয়ের অপেক্ষায়")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("orders"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
+              <p className="small" style={{ margin: 0 }}>• {lowInvCount} {tr(lang, "low-stock ingredients", "টি কম স্টকের উপকরণ")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("inventory"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
+              <p className="small" style={{ margin: 0 }}>• {lowStock.length} {tr(lang, "low-stock products", "টি কম স্টকের প্রোডাক্ট")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("products"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
+            </>}
+          </div>
+        )}
         {visibleTabs.map((t) => <button key={t.id} className={`chip ${activeTab === t.id ? "chip-on" : ""}`} onClick={() => setTab(t.id)}>{lang === "bn" ? t.bn : t.en}</button>)}
         <button className="btn-ghost" onClick={onBack}>{tr(lang, "Back to shop", "দোকানে ফিরুন")}</button>
       </nav>

@@ -130,7 +130,7 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
 
 function PromoVideo({ src, label, poster, lang }: { src: string | null; label: string; poster?: string; lang: Lang }) {
   if (!src) return poster ? <img src={poster} alt={label} style={{ width: "100%", height: 224, objectFit: "cover", display: "block" }} /> : null;
-  return <video src={src} poster={poster} autoPlay muted loop playsInline disablePictureInPicture preload="auto" aria-label={label} style={{ width: "100%", height: 224, objectFit: "cover", display: "block", background: "#000", pointerEvents: "none" }} />;
+  return <video src={src} poster={poster} autoPlay muted loop playsInline disablePictureInPicture preload="auto" aria-label={label} style={{ width: "100%", height: 280, objectFit: "cover", display: "block", background: "#000", pointerEvents: "none" }} />;
 }
 
 function promoSrc(choice: string | undefined): string | null {
