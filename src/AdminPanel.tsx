@@ -20,6 +20,7 @@ import {
   type Category, type Coupon, type Lang, type Order, type Product, type Reservation, type Settings, type UserDoc,
 } from "./db";
 import { placeOrderTx } from "./orders";
+import { InstallAppCard } from "./InstallAppCard";
 
 const tk = (n: number) => `৳${n.toLocaleString("en-US")}`;
 const IMG_FILES = [...new Set([...SEED_PRODUCTS.map((p) => p.img), ...SEED_PRODUCTS.map((p) => p.img2), ...BANNER_SLIDES.map((b) => b.img), "hero.jpg", "logo.jpg", "tray.jpg", "tray2.jpg", "menu-photo.jpg"])].sort();
@@ -562,6 +563,7 @@ function FirebaseTab({ userDoc, lang, onSeed, seedBusy, seedMsg }: { userDoc: Us
         </ol>
         <p className="small muted">{tr(lang, "Build env vars (names only): VITE_FIREBASE_API_KEY, VITE_FIREBASE_PROJECT_ID, VITE_FIREBASE_APP_ID, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID, VITE_FIREBASE_APPCHECK_KEY (optional). Values come from Firebase Console → Project settings → Your apps → “Cafe Reza Web”.", "বিল্ডের env var (শুধু নাম): VITE_FIREBASE_API_KEY, VITE_FIREBASE_PROJECT_ID, VITE_FIREBASE_APP_ID, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID, VITE_FIREBASE_APPCHECK_KEY (ঐচ্ছিক)। মান Firebase Console → Project settings → Your apps → “Cafe Reza Web” থেকে নিতে হবে।")}</p>
       </div>
+      <InstallAppCard variant="admin" lang={lang} />
     </div>
   );
 }

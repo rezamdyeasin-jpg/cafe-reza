@@ -28,6 +28,7 @@ import {
   type Settings, type UserDoc,
 } from "./db";
 import { placeOrderTx, type CartLine } from "./orders";
+import { InstallAppCard } from "./InstallAppCard";
 import { AdminPanel } from "./AdminPanel";
 
 export type CartItem = { productId: string; qty: number; size: string; sugar: string; milk: string; note: string };
@@ -80,6 +81,23 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
   }, [selection, products]);
   const [idx, setIdx] = useState(0);
   const [paused, setPaused] = useState(false);
+  const touchX = useRef<number | null>(null);
+  // Preload every banner poster once, so rotating slides never flashes blank
+  // and the page below never jumps while an image loads.
+  useEffect(() => {
+    slides.forEach((s) => { const im = new Image(); im.src = `/img/${s.img}`; });
+  }, [slides]);
+  const onTouchStart = (e: React.TouchEvent) => { const t = e.touches[0]; if (t) touchX.current = t.clientX; setPaused(true); };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    if (touchX.current === null) return;
+    const t = e.changedTouches[0];
+    if (t) {
+      const dx = t.clientX - touchX.current;
+      const w = (e.currentTarget as HTMLElement).clientWidth;
+      if (Math.abs(dx) > Math.max(40, w * 0.18)) setIdx((i) => (i + (dx < 0 ? 1 : -1) + slides.length) % slides.length);
+    }
+    touchX.current = null; setPaused(false);
+  };
   const reduced = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   useEffect(() => {
     if (slides.length < 2 || paused || reduced || document.hidden) return;
@@ -92,13 +110,14 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
   const product = slide.product;
   return (
     <div className="card mt-4 overflow-hidden" role="region" aria-label={tr(lang, "Café Reza promos", "ক্যাফে রেজার প্রোমো")}
-      onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}>
+      onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}
+      onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ touchAction: "pan-y" }}>
       <button type="button" onClick={() => onSelect(product)} className="block w-full text-left" style={{ background: "none", border: "none", padding: 0 }}>
-        <div className="banner-slide relative">
-          <img src={`/img/${slide.img}`} alt={slide.alt} style={{ width: "100%", height: 128, objectFit: "cover", display: "block" }} />
-          <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between px-3 py-2" style={{ background: "rgba(22,15,12,.72)", color: "#f5ebdd" }}>
-            <b>{displayName(product, lang)}</b><span>{orderable(product) ? tk(effPrice(product)) : tr(lang, "Price coming soon", "দাম আসছে")}</span>
-          </div>
+        <div className="banner-slide relative" style={{ background: "#0d0906", height: "min(78vw, 340px)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <img src={`/img/${slide.img}`} alt={slide.alt} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }} />
+        </div>
+        <div className="flex items-center justify-between px-3 py-2" style={{ background: "rgba(22,15,12,.72)", color: "#f5ebdd", gap: 8, flexWrap: "nowrap", height: 40 }}>
+          <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{displayName(product, lang)}</b><span style={{ flex: "none" }}>{orderable(product) ? tk(effPrice(product)) : tr(lang, "Price coming soon", "দাম আসছে")}</span>
         </div>
       </button>
       <div className="row px-3 py-2" style={{ justifyContent: "space-between" }}>
@@ -112,7 +131,7 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
 
 function PromoVideo({ src, label, poster, lang }: { src: string | null; label: string; poster?: string; lang: Lang }) {
   if (!src) return poster ? <img src={poster} alt={label} style={{ width: "100%", height: 224, objectFit: "cover", display: "block" }} /> : null;
-  return <video src={src} poster={poster} controls muted loop playsInline preload="metadata" aria-label={label} style={{ width: "100%", height: 224, objectFit: "cover", display: "block", background: "#000" }} />;
+  return <video src={src} poster={poster} autoPlay muted loop playsInline disablePictureInPicture preload="auto" aria-label={label} style={{ width: "100%", height: 224, objectFit: "cover", display: "block", background: "#000", pointerEvents: "none" }} />;
 }
 
 function promoSrc(choice: string | undefined): string | null {
@@ -544,41 +563,6 @@ function InfoView({ settings, lang }: { settings: Settings; lang: Lang }) {
   );
 }
 
-function InstallAppCard({ variant, lang }: { variant: "customer" | "admin"; lang: Lang }) {
-  const [installed, setInstalled] = useState(false);
-  const [deferred, setDeferred] = useState<Event | null>(null);
-  useEffect(() => {
-    const onPrompt = (e: Event) => { e.preventDefault(); setDeferred(e); };
-    window.addEventListener("beforeinstallprompt", onPrompt);
-    window.addEventListener("appinstalled", () => setInstalled(true));
-    return () => { window.removeEventListener("beforeinstallprompt", onPrompt); };
-  }, []);
-  useEffect(() => {
-    const file = variant === "admin" ? "manifest-admin.webmanifest" : "manifest-customer.webmanifest";
-    void fetch(`/${file}`, { method: "HEAD" }).then((res) => {
-      if (!res.ok) return;
-      let link = document.querySelector<HTMLLinkElement>('link[rel="manifest"]');
-      if (!link) { link = document.createElement("link"); link.rel = "manifest"; document.head.appendChild(link); }
-      link.href = `/${file}`;
-    }).catch(() => undefined);
-  }, [variant]);
-  const install = async () => {
-    const prompt = deferred as (Event & { prompt: () => Promise<void> }) | null;
-    if (prompt) { await prompt.prompt(); setDeferred(null); }
-  };
-  return (
-    <div className="card" style={{ padding: 14, marginTop: 14 }}>
-      <b>{variant === "admin" ? tr(lang, "Install the admin app", "অ্যাডমিন অ্যাপ ইনস্টল করুন") : tr(lang, "Install the Café Reza app", "ক্যাফে রেজা অ্যাপ ইনস্টল করুন")}</b>
-      <p className="small muted" style={{ marginTop: 4 }}>{installed
-        ? tr(lang, "Installed — the app is the same site, same account, same features as the website.", "ইনস্টল হয়েছে — অ্যাপ আর ওয়েবসাইট একই জিনিস: একই অ্যাকাউন্ট, একই সুবিধা।")
-        : tr(lang, "The app is this same website installed on the phone — same login, same menu, same orders. It needs internet; there is no offline mode.", "অ্যাপ মানে এই একই ওয়েবসাইট ফোনে ইনস্টল করা — একই লগইন, একই মেনু, একই অর্ডার। ইন্টারনেট লাগবে; অফলাইন মোড নেই।")}</p>
-      {deferred && <button className="btn-gold" style={{ marginTop: 8 }} onClick={() => void install()}>{tr(lang, "Install app", "অ্যাপ ইনস্টল করুন")}</button>}
-      {!deferred && !installed && <p className="small" style={{ marginTop: 8 }}>{tr(lang, "Android: Chrome menu → Install app. iPhone: Safari Share → Add to Home Screen.", "Android: Chrome মেনু → Install app। iPhone: Safari Share → Add to Home Screen।")}</p>}
-      {variant === "admin" && <p style={{ marginTop: 8 }}><a className="btn-ghost" style={{ textDecoration: "none" }} href="/manifest-admin.webmanifest" download="cafe-reza-admin.webmanifest">{tr(lang, "Download admin app file", "অ্যাডমিন অ্যাপের ফাইল ডাউনলোড করুন")}</a></p>}
-    </div>
-  );
-}
-
 export function App() {
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("cr_lang") === "en" ? "en" : "bn"));
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -677,7 +661,7 @@ export function App() {
             <button className="chip" aria-label="Switch language" onClick={() => setLang(lang === "bn" ? "en" : "bn")}>{lang === "bn" ? "EN" : "বাংলা"}</button>
             <button className="chip" aria-label="Toggle theme" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? "☀" : "☾"}</button>
             <button className="chip" aria-label={`Cart, ${cartCount} items`} onClick={() => setCartOpen(true)}>🛒 {cartCount}</button>
-            <button className="chip" onClick={() => navigate("account")}>{fbUser ? (userDoc?.name ?? tr(lang, "Account", "অ্যাকাউন্ট")) : tr(lang, "Sign in", "সাইন-ইন")}</button>
+            <button className="chip" onClick={() => navigate("account")} style={{ maxWidth: 150, minWidth: 118, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "none" }}>{fbUser ? (userDoc?.name ?? tr(lang, "Account", "অ্যাকাউন্ট")) : tr(lang, "Sign in", "সাইন-ইন")}</button>
           </div>
         </div>
         <nav className="wrap row" style={{ paddingBottom: 8 }} aria-label="Main">
@@ -731,6 +715,7 @@ export function App() {
             </div>
           </section>
 
+          <InstallAppCard variant="customer" lang={lang} />
           <AdSlotView slotId="home-banner" adsJson={settings.adsJson} />
           <BannerCarousel products={products} onSelect={(p) => setDetail(p)} lang={lang} />
 
