@@ -569,7 +569,11 @@ export function App() {
   const [view, setView] = useState<View>("store");
   const [fbUser, setFbUser] = useState<User | null>(null);
   const [loginSuccess, setLoginSuccess] = useState(false);
-  const onLoginSuccess = () => { setLoginSuccess(true); window.setTimeout(() => setLoginSuccess(false), 1500); };
+  const onLoginSuccess = () => {
+    setLoginSuccess(true);
+    const from = view;
+    window.setTimeout(() => { setLoginSuccess(false); if (from === "account") navigate("store"); }, 1500);
+  };
   const [userDoc, setUserDoc] = useState<UserDoc | null>(null);
   const [cat, setCat] = useState("all");
   const [q, setQ] = useState("");
