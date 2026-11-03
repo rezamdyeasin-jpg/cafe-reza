@@ -65,7 +65,7 @@ function IngredientPoster({ p, lang }: { p: Product; lang: Lang }) {
       <div className="row" style={{ justifyContent: "center" }}>
         {items.map((it) => <span key={it} className="chip" style={{ padding: "4px 10px" }}>{it}</span>)}
       </div>
-      <p className="small muted" style={{ marginTop: 8 }}>{tr(lang, "Diagram from the stored ingredient list — edit it in Admin → Products.", "সংরক্ষিত উপকরণ তালিকা থেকে আঁকা ডায়াগ্রাম — Admin → Products-এ বদলানো যায়।")}</p>
+      <p className="small muted" style={{ marginTop: 8 }}>{tr(lang, "Diagram from the stored ingredient list.", "সংরক্ষিত উপকরণ তালিকা থেকে আঁকা ডায়াগ্রাম।")}</p>
     </div>
   );
 }
@@ -256,7 +256,7 @@ function DetailModal({ p, categories, lang, onClose, onAdd, wishlisted, onWish }
           {tab === "photo" ? <ProductImage p={p} h={260} /> : <IngredientPoster p={p} lang={lang} />}
         </div>
         <p style={{ marginTop: 10 }}>{lang === "bn" ? p.description : p.description}</p>
-        <p style={{ fontSize: 20, fontWeight: 700 }}>{orderable(p) ? tk(effPrice(p)) : tr(lang, "Price coming soon — the owner sets it in Admin.", "দাম আসছে — মালিক Admin-এ বসাবেন।")}</p>
+        <p style={{ fontSize: 20, fontWeight: 700 }}>{orderable(p) ? tk(effPrice(p)) : tr(lang, "Price coming soon", "দাম আসছে")}</p>
         <div className="row" style={{ marginTop: 8 }}>
           <label style={{ flex: 1 }}>{tr(lang, "Size", "সাইজ")}<select aria-label="Size" value={size} onChange={(e) => setSize(e.target.value)}><option>Regular</option><option>Large</option><option>Small</option></select></label>
           <label style={{ flex: 1 }}>{tr(lang, "Sugar", "চিনি")}<select aria-label="Sugar" value={sugar} onChange={(e) => setSugar(e.target.value)}><option>Normal</option><option>Less</option><option>More</option><option>None</option></select></label>
@@ -484,7 +484,7 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
   );
 }
 
-function AccountView({ fbUser, userDoc, products, lang, onGoAdmin }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; lang: Lang; onGoAdmin: () => void }) {
+function AccountView({ fbUser, userDoc, products, lang }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; lang: Lang }) {
   const firestore = getDb();
   const { data: orders } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
@@ -507,7 +507,6 @@ function AccountView({ fbUser, userDoc, products, lang, onGoAdmin }: { fbUser: U
         <p className="small muted">{contact} • {userDoc?.tier ?? "Bronze"} • {userDoc?.loyaltyPoints ?? 0} {tr(lang, "loyalty points", "লয়্যালটি পয়েন্ট")}</p>
         <div className="row" style={{ marginTop: 8 }}>
           <button className="btn-ghost" onClick={() => void signOutUser()}>{tr(lang, "Sign out", "সাইন-আউট")}</button>
-          {userDoc && isStaffRole(userDoc.role) && <button className="btn-gold" onClick={onGoAdmin}>{tr(lang, "Open admin panel", "অ্যাডমিন প্যানেল খুলুন")}</button>}
         </div>
       </div>
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My orders", "আমার অর্ডারগুলো")}</h3>
@@ -551,12 +550,12 @@ function InfoView({ settings, lang }: { settings: Settings; lang: Lang }) {
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Opening hours", "খোলার সময়")}</b>
         {hours.length === 0
-          ? <p className="muted small" style={{ marginTop: 6 }}>{settings.hours || tr(lang, "Hours are set by the cafe in the admin panel.", "সময় ক্যাফে অ্যাডমিন প্যানেলে বসায়।")}</p>
+          ? <p className="muted small" style={{ marginTop: 6 }}>{settings.hours || tr(lang, "Hours are not set yet.", "সময় এখনো বসানো হয়নি।")}</p>
           : <table><tbody>{hours.map((h) => <tr key={h.day}><td>{h.day}</td><td>{h.closed ? tr(lang, "Closed", "বন্ধ") : `${h.open} – ${h.close}`}</td></tr>)}</tbody></table>}
       </div>
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Policies", "নীতিমালা")}</b>
-        <p className="small" style={{ marginTop: 6 }}>{tr(lang, "Pending/Confirmed orders can be cancelled with stock restored. Mobile payments stay “Pending verification” until the owner verifies them in Admin — never auto-marked paid. Prices follow the owner's printed menu; items without a price stay unorderable until the owner sets one in Admin.", "অপেক্ষমাণ/নিশ্চিত অর্ডার স্টক ফিরিয়ে বাতিল করা যায়। মোবাইল পেমেন্ট মালিক অ্যাডমিনে যাচাই না করা পর্যন্ত “যাচাইয়ের অপেক্ষায়” থাকে — কখনো স্বয়ংক্রিয়ভাবে পরিশোধিত ধরা হয় না। দাম মালিকের ছাপা মেনু অনুযায়ী; দাম ছাড়া আইটেম মালিক Admin-এ দাম না বসানো পর্যন্ত অর্ডার করা যায় না।")}</p>
+        <p className="small" style={{ marginTop: 6 }}>{tr(lang, "Pending/Confirmed orders can be cancelled with stock restored. Mobile payments stay “Pending verification” until verified — never auto-marked paid. Prices follow the printed menu; items without a price stay unorderable until a price is set.", "অপেক্ষমাণ/নিশ্চিত অর্ডার স্টক ফিরিয়ে বাতিল করা যায়। মোবাইল পেমেন্ট যাচাই না করা পর্যন্ত “যাচাইয়ের অপেক্ষায়” থাকে — কখনো স্বয়ংক্রিয়ভাবে পরিশোধিত ধরা হয় না। দাম ছাপা মেনু অনুযায়ী; দাম ছাড়া আইটেম দাম না বসানো পর্যন্ত অর্ডার করা যায় না।")}</p>
       </div>
     </div>
   );
@@ -598,6 +597,12 @@ export function App() {
     const hash = v === "store" ? "#/" : v === "info" ? "#/about" : `#/${v}`;
     if (window.location.hash !== hash) window.location.hash = hash;
   };
+  // The customer app never shows the admin panel: a signed-in account
+  // without a staff role that opens #/admin is sent back to the shop
+  // silently — no denial text, no admin mention.
+  useEffect(() => {
+    if (view === "admin" && fbUser && userDoc && !isStaffRole(userDoc.role)) navigate("store");
+  }, [view, fbUser, userDoc]);
 
   useEffect(() => watchAuth((u) => setFbUser(u)), []);
   useEffect(() => {
@@ -667,7 +672,6 @@ export function App() {
           {([["store", tr(lang, "Menu", "মেনু")], ["track", tr(lang, "Track", "ট্র্যাক")], ["reserve", tr(lang, "Reserve", "রিজার্ভ")], ["info", tr(lang, "About", "সম্পর্কে")], ["account", tr(lang, "Account", "অ্যাকাউন্ট")]] as Array<[View, string]>).map(([v, label]) => (
             <button key={v} className={`chip ${view === v ? "chip-on" : ""}`} onClick={() => navigate(v)}>{label}</button>
           ))}
-          <button className={`chip ${view === "admin" ? "chip-on" : ""}`} onClick={() => navigate("admin")}>{tr(lang, "Admin", "অ্যাডমিন")}</button>
         </nav>
       </header>
 
@@ -690,7 +694,7 @@ export function App() {
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><ReserveView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} lang={lang} /></main>
       ) : view === "account" ? (
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}>
-          <AccountView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} products={products} lang={lang} onGoAdmin={() => navigate("admin")} />
+          <AccountView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} products={products} lang={lang} />
           <InstallAppCard variant="customer" lang={lang} />
         </main>
       ) : view === "info" ? (
@@ -752,7 +756,7 @@ export function App() {
           {filtered.length === 0 && !catalogError && (
             <div className="card" style={{ padding: 16, marginTop: 14, textAlign: "center" }}>
               <p>{isFirebaseConfigured
-                ? tr(lang, "The menu is empty in Firestore. An admin can seed the real Cafe Reza catalog (34 products, 9 categories) from the admin panel.", "Firestore-এ মেনু খালি। অ্যাডমিন প্যানেল থেকে অ্যাডমিন আসল ক্যাটালগ (৩৪টি প্রোডাক্ট, ৯টি ক্যাটাগরি) বসাতে পারেন।")
+                ? tr(lang, "The menu is empty right now.", "মেনু এখন খালি।")
                 : tr(lang, "The menu loads from Firestore once Firebase is configured.", "Firebase কনফিগার হলেই মেনু Firestore থেকে আসবে।")}</p>
               {isStaff && <button className="btn-gold" style={{ marginTop: 8 }} disabled={seedBusy} onClick={() => void runSeed()}>{seedBusy ? tr(lang, "Seeding…", "বসানো হচ্ছে…") : tr(lang, "Seed catalog", "ক্যাটালগ বসান")}</button>}
               {seedMsg && <p className="small" role="status">{seedMsg}</p>}
@@ -802,9 +806,8 @@ export function App() {
             <p className="small" style={{ margin: "4px 0 0" }}>{settings.address}</p>
             <p className="small" style={{ margin: 0 }}>{tr(lang, "Call:", "কল করুন:")} <a href={`tel:${settings.phone.replace(/[^+\d]/g, "")}`}>{settings.phone}</a> • <a href={settings.facebook} target="_blank" rel="noreferrer">Facebook</a> • <a href={MAPS_LINK} target="_blank" rel="noopener">{tr(lang, "Get Directions", "দিকনির্দেশনা নিন")}</a></p>
           </div>
-          <button className="btn-ghost" onClick={() => navigate("admin")}>{tr(lang, "Staff sign-in", "স্টাফ সাইন-ইন")}</button>
         </div>
-        <p className="small muted text-center" style={{ marginTop: 10 }}>BDT (৳) • Asia/Dhaka • {tr(lang, "Firestore is the database. Mobile payments stay “Pending verification” until the owner verifies them.", "Firestore-ই ডেটাবেস। মোবাইল পেমেন্ট মালিক যাচাই না করা পর্যন্ত “যাচাইয়ের অপেক্ষায়” থাকে।")}</p>
+        <p className="small muted text-center" style={{ marginTop: 10 }}>BDT (৳) • Asia/Dhaka • {tr(lang, "Mobile payments stay “Pending verification” until verified.", "মোবাইল পেমেন্ট যাচাই না করা পর্যন্ত “যাচাইয়ের অপেক্ষায়” থাকে।")}</p>
       </footer>
 
       <nav className="bottomnav no-print" aria-label="Mobile">

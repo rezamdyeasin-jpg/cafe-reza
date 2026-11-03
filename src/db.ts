@@ -137,6 +137,11 @@ export function orderFromDoc(id: string, d: DocumentData): Order {
     items, couponCode: o.couponCode ?? "", createdAt: tsToIso(o.createdAt),
   };
 }
+export function expenseFromDoc(id: string, d: DocumentData): Expense {
+  const e = d as Partial<Expense> & { createdAt?: unknown };
+  return { id, category: e.category ?? "", description: e.description ?? "", amount: Number(e.amount ?? 0), date: e.date ?? "", createdAt: tsToIso(e.createdAt) };
+}
+
 export function userFromDoc(id: string, d: DocumentData): UserDoc {
   const u = d as Partial<UserDoc> & { createdAt?: unknown };
   return {

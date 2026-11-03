@@ -15,9 +15,9 @@ import {
 import { getDb, probeFirestore } from "./firebase";
 import { BANNER_SLIDES, CUSTOMER_EMAIL, OWNER_EMAIL, SEED_PRODUCTS } from "./seed";
 import {
-  isStaffRole, orderFromDoc, parseAds, parseBannerSelection, parseContent,
+  AD_SLOT_DEFS, expenseFromDoc, isStaffRole, orderFromDoc, ORDER_STATUSES, parseAds, parseBannerSelection, parseContent,
   tr, useLive, userFromDoc,
-  type Category, type Coupon, type Lang, type Order, type Product, type Reservation, type Settings, type UserDoc,
+  type Category, type Coupon, type Expense, type Lang, type Order, type Product, type Reservation, type Settings, type UserDoc,
 } from "./db";
 import { placeOrderTx } from "./orders";
 import { InstallAppCard } from "./InstallAppCard";
@@ -26,6 +26,24 @@ const tk = (n: number) => `৳${n.toLocaleString("en-US")}`;
 const IMG_FILES = [...new Set([...SEED_PRODUCTS.map((p) => p.img), ...SEED_PRODUCTS.map((p) => p.img2), ...BANNER_SLIDES.map((b) => b.img), "hero.jpg", "logo.jpg", "tray.jpg", "tray2.jpg", "menu-photo.jpg"])].sort();
 const STAFF_ROLES = ["admin", "manager", "cashier", "kitchen", "waiter", "delivery", "inventory"];
 const PAYMENTS = ["Cash on Delivery", "Cash at Counter", "Cash", "bKash", "Nagad", "Rocket", "Bank Transfer"];
+
+// Super Admin = the owner account (role admin + pinned owner email).
+// Only the owner sees money figures, role management, settings and the
+// Owner panel. Other staff get the same panel design, but only the tabs
+// their role allows — never financial data.
+const isOwnerDoc = (u: UserDoc | null | undefined) => !!u && u.role === "admin" && (u.email || "").toLowerCase() === OWNER_EMAIL;
+const dayKey = (iso: string) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? "" : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const todayKey = () => dayKey(new Date().toISOString());
+type Period = "today" | "7d" | "30d" | "all";
+const inPeriod = (o: Order, period: Period) => {
+  if (period === "all") return true;
+  if (period === "today") return dayKey(o.createdAt) === todayKey();
+  const days = period === "7d" ? 7 : 30;
+  const t = new Date(o.createdAt).getTime();
+  return !Number.isNaN(t) && t >= Date.now() - days * 86400000;
+};
+const LIVE_ORDER = (o: Order) => o.status !== "Cancelled" && o.status !== "Refunded";
+const realized = (list: Order[]) => list.filter((o) => LIVE_ORDER(o) && (o.status === "Completed" || o.status === "Delivered")).reduce((a, o) => a + o.total, 0);
 
 function audit(actor: UserDoc, action: string, detail: string) {
   const firestore = getDb();
@@ -56,7 +74,8 @@ function OrdersTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Pr
   };
   return (
     <div>
-      <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Orders / Kitchen", "অর্ডার / কিচেন")}</h3>
+      <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Live Orders / Kitchen", "লাইভ অর্ডার / কিচেন")}</h3>
+      <p className="small"><span style={{ color: "var(--good)" }}>● {tr(lang, "LIVE", "লাইভ")}</span> — {tr(lang, "New orders appear here the moment they arrive.", "নতুন অর্ডার আসার সঙ্গে সঙ্গে এখানে দেখা যাবে।")} {orders.filter((o) => o.status === "Pending").length} {tr(lang, "pending", "টি অপেক্ষমাণ")}</p>
       {note && <p className="small" role="status">{note}</p>}
       <label>{tr(lang, "Refund reason (for the button below)", "ফেরতের কারণ (নিচের বোতামের জন্য)")}<input aria-label="Refund reason" value={refundReason} onChange={(e) => setRefundReason(e.target.value)} /></label>
       {orders.length === 0 && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
@@ -306,19 +325,17 @@ function ContentTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: S
   const [showGallery, setShowGallery] = useState(content.showGallery);
   const [promoVideo, setPromoVideo] = useState(settings.promoVideo);
   const [banners, setBanners] = useState<string[]>(parseBannerSelection(settings.bannersJson));
-  const [ads, setAds] = useState(parseAds(settings.adsJson));
   const [msg, setMsg] = useState("");
   useEffect(() => { setAnnouncement(content.announcement); setAboutText(content.aboutText); setShowGallery(content.showGallery); }, [settings.contentJson]);
   useEffect(() => { setPromoVideo(settings.promoVideo); }, [settings.promoVideo]);
   useEffect(() => { setBanners(parseBannerSelection(settings.bannersJson)); }, [settings.bannersJson]);
-  useEffect(() => { setAds(parseAds(settings.adsJson)); }, [settings.adsJson]);
   const saveAll = async () => {
     if (!firestore) return;
     await setDoc(doc(firestore, "settings", "cafe"), {
       contentJson: JSON.stringify({ announcement, aboutText, showGallery }),
-      promoVideo, bannersJson: JSON.stringify(banners), adsJson: JSON.stringify(ads),
+      promoVideo, bannersJson: JSON.stringify(banners),
     }, { merge: true });
-    audit(userDoc, "content.save", "Homepage content, video, banners and ad slots updated.");
+    audit(userDoc, "content.save", "Homepage content, video and banners updated.");
     setMsg(tr(lang, "Saved — the customer site updates at once.", "সংরক্ষিত হয়েছে — কাস্টমার সাইট সাথে সাথে বদলে যাবে।"));
   };
   return (
@@ -336,17 +353,6 @@ function ContentTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: S
             <input type="checkbox" checked={banners.includes(b.slug)} style={{ width: "auto" }} onChange={(e) => setBanners(e.target.checked ? [...banners, b.slug] : banners.filter((s) => s !== b.slug))} />
             <img src={`/img/${b.img}`} alt={b.alt} style={{ width: 64, height: 32, objectFit: "cover", borderRadius: 6 }} /> {b.slug}
           </label>
-        ))}
-        <b style={{ display: "block", marginTop: 12 }}>{tr(lang, "Ad placements (off by default)", "বিজ্ঞাপনের জায়গা (ডিফল্টে বন্ধ)")}</b>
-        {ads.map((slot, i) => (
-          <div key={slot.id} className="card" style={{ padding: 10, marginTop: 8 }}>
-            <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={slot.enabled} style={{ width: "auto" }} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, enabled: e.target.checked } : a))} />{slot.id}</label>
-            <label>{tr(lang, "Type", "ধরন")}<select aria-label={`Ad type ${slot.id}`} value={slot.kind} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, kind: e.target.value as "image" | "code" } : a))}><option value="image">Banner image + link</option><option value="code">Embed code (sandboxed)</option></select></label>
-            {slot.kind === "image" ? <>
-              <label>{tr(lang, "Image URL", "ছবির লিংক")}<input aria-label={`Ad image ${slot.id}`} value={slot.imageUrl} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, imageUrl: e.target.value } : a))} /></label>
-              <label>{tr(lang, "Link URL", "লিংক")}<input aria-label={`Ad link ${slot.id}`} value={slot.linkUrl} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, linkUrl: e.target.value } : a))} /></label>
-            </> : <label>{tr(lang, "Embed code", "এমবেড কোড")}<textarea aria-label={`Ad code ${slot.id}`} rows={3} value={slot.code} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, code: e.target.value } : a))} /></label>}
-          </div>
         ))}
         <button className="btn-gold" style={{ marginTop: 12 }} onClick={() => void saveAll()}>{tr(lang, "Save content & banners", "কনটেন্ট ও ব্যানার সংরক্ষণ করুন")}</button>
       </div>
@@ -568,20 +574,284 @@ function FirebaseTab({ userDoc, lang, onSeed, seedBusy, seedMsg }: { userDoc: Us
   );
 }
 
-const ADMIN_TABS: Array<[string, string, string]> = [
-  ["dashboard", "Dashboard", "ড্যাশবোর্ড"],
-  ["orders", "Orders / Kitchen", "অর্ডার / কিচেন"],
-  ["pos", "POS", "POS"],
-  ["products", "Products & Categories", "প্রোডাক্ট ও ক্যাটাগরি"],
-  ["reservations", "Tables & Reservations", "টেবিল ও রিজার্ভেশন"],
-  ["coupons", "Coupons & Offers", "কুপন ও অফার"],
-  ["content", "Content & Banners", "কনটেন্ট ও ব্যানার"],
-  ["settings", "Settings", "সেটিংস"],
-  ["users", "Users & Staff", "ইউজার ও স্টাফ"],
-  ["support", "Support & Reviews", "সাপোর্ট ও রিভিউ"],
-  ["inventory", "Inventory", "ইনভেন্টরি"],
-  ["firebase", "Firebase & Launch", "Firebase ও লঞ্চ"],
+type AdminTabDef = { id: string; en: string; bn: string; roles: string[]; ownerOnly?: boolean };
+const ADMIN_TABS: AdminTabDef[] = [
+  { id: "owner", en: "Owner", bn: "মালিক", roles: ["admin"], ownerOnly: true },
+  { id: "dashboard", en: "Dashboard", bn: "ড্যাশবোর্ড", roles: ["admin", "manager", "cashier", "kitchen", "waiter", "delivery", "inventory"] },
+  { id: "orders", en: "Live Orders / Kitchen", bn: "লাইভ অর্ডার / কিচেন", roles: ["admin", "manager", "cashier", "kitchen", "waiter", "delivery"] },
+  { id: "pos", en: "POS", bn: "POS", roles: ["admin", "manager", "cashier"] },
+  { id: "analytics", en: "Analytics", bn: "অ্যানালাইসিস", roles: ["admin"], ownerOnly: true },
+  { id: "finance", en: "Finance", bn: "আয়-ব্যয়", roles: ["admin"], ownerOnly: true },
+  { id: "products", en: "Products & Categories", bn: "প্রোডাক্ট ও ক্যাটাগরি", roles: ["admin", "manager", "inventory"] },
+  { id: "reservations", en: "Tables & Reservations", bn: "টেবিল ও রিজার্ভেশন", roles: ["admin", "manager", "cashier", "waiter"] },
+  { id: "coupons", en: "Coupons & Offers", bn: "কুপন ও অফার", roles: ["admin", "manager"] },
+  { id: "ads", en: "Ads", bn: "বিজ্ঞাপন", roles: ["admin", "manager"] },
+  { id: "content", en: "Content & Banners", bn: "কনটেন্ট ও ব্যানার", roles: ["admin", "manager"] },
+  { id: "inventory", en: "Inventory", bn: "ইনভেন্টরি", roles: ["admin", "manager", "inventory"] },
+  { id: "users", en: "Users & Staff", bn: "ইউজার ও স্টাফ", roles: ["admin"], ownerOnly: true },
+  { id: "support", en: "Support & Reviews", bn: "সাপোর্ট ও রিভিউ", roles: ["admin", "manager", "cashier"] },
+  { id: "settings", en: "Settings", bn: "সেটিংস", roles: ["admin"], ownerOnly: true },
+  { id: "firebase", en: "Firebase & Launch", bn: "Firebase ও লঞ্চ", roles: ["admin"], ownerOnly: true },
 ];
+
+function PeriodButtons({ period, setPeriod, lang }: { period: Period; setPeriod: (p: Period) => void; lang: Lang }) {
+  const opts: Array<[Period, string, string]> = [["today", "Today", "আজ"], ["7d", "Last 7 days", "৭ দিন"], ["30d", "Last 30 days", "৩০ দিন"], ["all", "All time", "সব"]];
+  return (
+    <div className="row" style={{ marginTop: 8 }}>
+      {opts.map(([v, en, bn]) => <button key={v} className={`chip ${period === v ? "chip-on" : ""}`} onClick={() => setPeriod(v)}>{lang === "bn" ? bn : en}</button>)}
+    </div>
+  );
+}
+
+function Bar({ label, value, max, suffix }: { label: string; value: number; max: number; suffix: string }) {
+  const pct = max > 0 ? Math.round((value / max) * 100) : 0;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}><span className="small">{label}</span><b className="small">{suffix}</b></div>
+      <div style={{ height: 8, background: "var(--surface2)", borderRadius: 4, marginTop: 2 }}><div style={{ width: `${pct}%`, height: "100%", background: "var(--accent)", borderRadius: 4 }} /></div>
+    </div>
+  );
+}
+
+// Ads: a dedicated tab (it used to live inside Content). Slots are off by
+// default; enabling one shows it on the customer site at that placement.
+function AdsTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: Settings; lang: Lang }) {
+  const firestore = getDb();
+  const [ads, setAds] = useState(parseAds(settings.adsJson));
+  const [msg, setMsg] = useState("");
+  useEffect(() => { setAds(parseAds(settings.adsJson)); }, [settings.adsJson]);
+  const save = async () => {
+    if (!firestore) return;
+    await setDoc(doc(firestore, "settings", "cafe"), { adsJson: JSON.stringify(ads) }, { merge: true });
+    audit(userDoc, "ads.save", "Ad placements updated.");
+    setMsg(tr(lang, "Saved — the customer site updates at once.", "সংরক্ষিত হয়েছে — কাস্টমার সাইট সাথে সাথে বদলে যাবে।"));
+  };
+  return (
+    <div>
+      <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Ads", "বিজ্ঞাপন")}</h3>
+      <p className="small muted">{tr(lang, "Ads are off by default. Enable a slot to show it on the customer site at that place — your own banner image + link, or an embed code. No ad network is connected, so there is no ad income or click tracking here.", "বিজ্ঞাপন ডিফল্টে বন্ধ থাকে। চালু করলে কাস্টমার সাইটের ওই জায়গায় দেখাবে — নিজের ব্যানার ছবি + লিংক, অথবা এমবেড কোড। কোনো বিজ্ঞাপন নেটওয়ার্ক যুক্ত নেই, তাই আয় বা ক্লিকের হিসাব এখানে আসে না।")}</p>
+      {msg && <p className="small" role="status">{msg}</p>}
+      {ads.map((slot, i) => (
+        <div key={slot.id} className="card" style={{ padding: 10, marginTop: 8 }}>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={slot.enabled} style={{ width: "auto" }} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, enabled: e.target.checked } : a))} />{AD_SLOT_DEFS.find((d) => d.id === slot.id)?.label ?? slot.id}</label>
+          <label>{tr(lang, "Type", "ধরন")}<select aria-label={`Ad type ${slot.id}`} value={slot.kind} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, kind: e.target.value as "image" | "code" } : a))}><option value="image">Banner image + link</option><option value="code">Embed code (sandboxed)</option></select></label>
+          {slot.kind === "image" ? <>
+            <label>{tr(lang, "Image URL", "ছবির লিংক")}<input aria-label={`Ad image ${slot.id}`} value={slot.imageUrl} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, imageUrl: e.target.value } : a))} /></label>
+            <label>{tr(lang, "Link URL", "লিংক")}<input aria-label={`Ad link ${slot.id}`} value={slot.linkUrl} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, linkUrl: e.target.value } : a))} /></label>
+          </> : <label>{tr(lang, "Embed code", "এমবেড কোড")}<textarea aria-label={`Ad code ${slot.id}`} rows={3} value={slot.code} onChange={(e) => setAds(ads.map((a, j) => j === i ? { ...a, code: e.target.value } : a))} /></label>}
+        </div>
+      ))}
+      <button className="btn-gold" style={{ marginTop: 12 }} onClick={() => void save()}>{tr(lang, "Save ads", "বিজ্ঞাপন সংরক্ষণ করুন")}</button>
+    </div>
+  );
+}
+
+// Analytics (owner only): real Firestore orders only — never fake figures.
+// Revenue counts Completed/Delivered orders; Cancelled/Refunded are excluded.
+function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[]; products: Product[]; categories: Category[]; lang: Lang }) {
+  const [period, setPeriod] = useState<Period>("30d");
+  const list = orders.filter((o) => inPeriod(o, period));
+  const live = list.filter(LIVE_ORDER);
+  const revenue = realized(live);
+  const completed = live.filter((o) => o.status === "Completed" || o.status === "Delivered");
+  const aov = completed.length > 0 ? Math.round(revenue / completed.length) : 0;
+  const discount = live.reduce((a, o) => a + o.discount, 0);
+  const cancelled = list.filter((o) => o.status === "Cancelled").length;
+  const best = (() => {
+    const m = new Map<string, { name: string; qty: number; rev: number }>();
+    live.forEach((o) => o.items.forEach((it) => { const cur = m.get(it.productId) ?? { name: it.name, qty: 0, rev: 0 }; cur.qty += it.qty; cur.rev += it.price * it.qty; m.set(it.productId, cur); }));
+    return [...m.values()].sort((a, b) => b.qty - a.qty).slice(0, 8);
+  })();
+  const byCat = (() => {
+    const m = new Map<string, number>();
+    const prodBySlug = new Map(products.map((p) => [p.slug, p]));
+    live.forEach((o) => o.items.forEach((it) => { const p = prodBySlug.get(it.productId); const cid = p?.categoryId ?? ""; m.set(cid, (m.get(cid) ?? 0) + it.price * it.qty); }));
+    return [...m.entries()].map(([cid, rev]) => {
+      const cat = categories.find((c) => c.id === cid);
+      return { name: cat ? (lang === "bn" ? cat.nameBn : cat.nameEn) : tr(lang, "Other", "অন্যান্য"), rev };
+    }).sort((a, b) => b.rev - a.rev);
+  })();
+  const byPayment = (() => {
+    const m = new Map<string, { n: number; rev: number }>();
+    live.forEach((o) => { const cur = m.get(o.paymentMethod) ?? { n: 0, rev: 0 }; cur.n += 1; cur.rev += o.total; m.set(o.paymentMethod, cur); });
+    return [...m.entries()].sort((a, b) => b[1].rev - a[1].rev);
+  })();
+  const byHour = (() => {
+    const blocks = [0, 0, 0, 0, 0, 0];
+    live.forEach((o) => { const h = new Date(o.createdAt).getHours(); if (!Number.isNaN(h)) { const bi = Math.floor(h / 4); blocks[bi] = (blocks[bi] ?? 0) + 1; } });
+    return blocks;
+  })();
+  const maxBest = best[0]?.qty ?? 0;
+  const maxCat = byCat[0]?.rev ?? 0;
+  const downloadCsv = () => {
+    const rows: string[][] = [["Order", "Date", "Customer", "Phone", "Items", "Total", "Status", "Payment", "PaymentStatus"]];
+    list.forEach((o) => rows.push([o.orderNo, o.createdAt, o.customerName, o.phone, o.items.map((it) => `${it.qty}x ${it.name}`).join("; "), String(o.total), o.status, o.paymentMethod, o.paymentStatus]));
+    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = "cafe-reza-orders.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  return (
+    <div>
+      <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Analytics", "অ্যানালাইসিস")}</h3>
+      <p className="small muted">{tr(lang, "Real orders from Firestore only. Revenue counts Completed / Delivered orders; Cancelled / Refunded are excluded.", "শুধু Firestore-এর আসল অর্ডার। আয় শুধু সম্পন্ন / ডেলিভার্ড অর্ডার; বাতিল / ফেরত বাদ।")}</p>
+      <PeriodButtons period={period} setPeriod={setPeriod} lang={lang} />
+      <div className="grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginTop: 10 }}>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(revenue)}</b><p className="small">{tr(lang, "Revenue", "আয়")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{live.length}</b><p className="small">{tr(lang, "Orders", "অর্ডার")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(aov)}</b><p className="small">{tr(lang, "Average order value", "গড় অর্ডার মূল্য")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(discount)}</b><p className="small">{tr(lang, "Discounts given", "দেওয়া ছাড়")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{cancelled}</b><p className="small">{tr(lang, "Cancelled", "বাতিল")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{list.reduce((a, o) => a + o.deliveryFee, 0) > 0 ? tk(list.reduce((a, o) => a + o.deliveryFee, 0)) : "—"}</b><p className="small">{tr(lang, "Delivery fees", "ডেলিভারি ফি")}</p></div>
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Best sellers", "সেরা বিক্রি")}</b>
+        {best.length === 0 ? <p className="small muted">{tr(lang, "No orders in this period.", "এই সময়ে কোনো অর্ডার নেই।")}</p> : best.map((b) => <Bar key={b.name} label={`${b.name} × ${b.qty}`} value={b.qty} max={maxBest} suffix={tk(b.rev)} />)}
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Revenue by category", "ক্যাটাগরি অনুযায়ী আয়")}</b>
+        {byCat.length === 0 ? <p className="small muted">{tr(lang, "No orders in this period.", "এই সময়ে কোনো অর্ডার নেই।")}</p> : byCat.map((c) => <Bar key={c.name} label={c.name} value={c.rev} max={maxCat} suffix={tk(c.rev)} />)}
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "By payment method", "পেমেন্ট মাধ্যম অনুযায়ী")}</b>
+        {byPayment.length === 0 ? <p className="small muted">{tr(lang, "No orders in this period.", "এই সময়ে কোনো অর্ডার নেই।")}</p> : byPayment.map(([m, v]) => <p key={m} className="small">{m} — {v.n} {tr(lang, "orders", "অর্ডার")} • {tk(v.rev)}</p>)}
+        <b style={{ display: "block", marginTop: 12 }}>{tr(lang, "By order status", "অর্ডারের অবস্থা অনুযায়ী")}</b>
+        {ORDER_STATUSES.map((st) => { const n = list.filter((o) => o.status === st).length; return n > 0 ? <p key={st} className="small">{st} — {n}</p> : null; })}
+        <b style={{ display: "block", marginTop: 12 }}>{tr(lang, "Orders by 4-hour block", "৪ ঘণ্টার ব্লক অনুযায়ী অর্ডার")}</b>
+        {byHour.map((n, i) => <p key={i} className="small">{`${String(i * 4).padStart(2, "0")}:00–${String(i * 4 + 4).padStart(2, "0")}:00`} — {n}</p>)}
+      </div>
+      <button className="btn-gold" style={{ marginTop: 12 }} onClick={downloadCsv}>{tr(lang, "Download orders CSV (this period)", "অর্ডারের CSV ডাউনলোড (এই সময়ের)")}</button>
+    </div>
+  );
+}
+
+// Finance (owner only): income, expenses, profit and cash — revenue is
+// never confused with profit.
+function FinanceTab({ userDoc, orders, lang }: { userDoc: UserDoc; orders: Order[]; lang: Lang }) {
+  const firestore = getDb();
+  const { data: expenses } = useLive<Expense>(() => (firestore ? query(collection(firestore, "expenses"), orderBy("date", "desc"), limit(200)) : null), expenseFromDoc);
+  const [period, setPeriod] = useState<Period>("30d");
+  const [f, setF] = useState({ date: todayKey(), category: "কাঁচামাল", description: "", amount: 0 });
+  const [msg, setMsg] = useState("");
+  const expInPeriod = expenses.filter((e) => {
+    if (period === "all") return true;
+    if (period === "today") return e.date === todayKey();
+    const days = period === "7d" ? 7 : 30;
+    const t = new Date(`${e.date}T00:00:00`).getTime();
+    return !Number.isNaN(t) && t >= Date.now() - days * 86400000;
+  });
+  const list = orders.filter((o) => inPeriod(o, period));
+  const live = list.filter(LIVE_ORDER);
+  const revenue = realized(live);
+  const expTotal = expInPeriod.reduce((a, e) => a + e.amount, 0);
+  const profit = revenue - expTotal;
+  const discount = live.reduce((a, o) => a + o.discount, 0);
+  const deliveryFees = live.reduce((a, o) => a + o.deliveryFee, 0);
+  const paidByMethod = (() => {
+    const m = new Map<string, number>();
+    live.forEach((o) => { if (o.paidAmount > 0) m.set(o.paymentMethod, (m.get(o.paymentMethod) ?? 0) + o.paidAmount); });
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  })();
+  const unpaid = live.reduce((a, o) => a + Math.max(0, o.total - o.paidAmount), 0);
+  const addExpense = async () => {
+    if (!firestore || f.amount <= 0 || !f.description.trim()) { setMsg(tr(lang, "Enter a description and an amount above 0.", "বিবরণ ও ০-এর বেশি টাকা লিখুন।")); return; }
+    await addDoc(collection(firestore, "expenses"), { category: f.category, description: f.description.trim(), amount: f.amount, date: f.date, createdAt: serverTimestamp() });
+    audit(userDoc, "expense.add", `${f.category} — ${f.description.trim()} ৳${f.amount}`);
+    setF({ date: todayKey(), category: "কাঁচামাল", description: "", amount: 0 });
+    setMsg(tr(lang, "Expense saved.", "খরচ সংরক্ষণ হয়েছে।"));
+  };
+  return (
+    <div>
+      <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Finance", "আয়-ব্যয়")}</h3>
+      <p className="small muted">{tr(lang, "Revenue is not profit: profit = revenue − expenses. Cash figures count only money actually received (paidAmount).", "আয় আর লাভ এক নয়: লাভ = আয় − খরচ। নগদ হিসাব শুধু আসলে পাওয়া টাকা (paidAmount) ধরে।")}</p>
+      <PeriodButtons period={period} setPeriod={setPeriod} lang={lang} />
+      <div className="grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginTop: 10 }}>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(revenue)}</b><p className="small">{tr(lang, "Revenue (Completed / Delivered)", "আয় (সম্পন্ন / ডেলিভার্ড)")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(expTotal)}</b><p className="small">{tr(lang, "Expenses", "খরচ")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(profit)}</b><p className="small">{tr(lang, "Estimated profit", "আনুমানিক লাভ")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(discount)}</b><p className="small">{tr(lang, "Discounts given", "দেওয়া ছাড়")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(deliveryFees)}</b><p className="small">{tr(lang, "Delivery fees", "ডেলিভারি ফি")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(unpaid)}</b><p className="small">{tr(lang, "Unpaid balance", "বাকি (অপরিশোধিত)")}</p></div>
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Cash received by payment method", "পেমেন্ট মাধ্যম অনুযায়ী প্রাপ্ত অর্থ")}</b>
+        {paidByMethod.length === 0 ? <p className="small muted">{tr(lang, "No money received in this period.", "এই সময়ে কোনো টাকা পাওয়া যায়নি।")}</p> : paidByMethod.map(([m, v]) => <p key={m} className="small">{m} — {tk(v)}</p>)}
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Add an expense", "খরচ যোগ করুন")}</b>
+        {msg && <p className="small" role="status">{msg}</p>}
+        <div className="row">
+          <label>{tr(lang, "Date", "তারিখ")}<input aria-label="Expense date" type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} /></label>
+          <label>{tr(lang, "Category", "ধরন")}<select aria-label="Expense category" value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>{["কাঁচামাল", "ভাড়া", "বেতন", "বিদ্যুৎ ও গ্যাস", "পরিবহন", "অন্যান্য"].map((c) => <option key={c}>{c}</option>)}</select></label>
+        </div>
+        <label>{tr(lang, "Description", "বিবরণ")}<input aria-label="Expense description" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></label>
+        <label>{tr(lang, "Amount (৳)", "টাকা (৳)")}<input aria-label="Expense amount" type="number" value={f.amount || ""} onChange={(e) => setF({ ...f, amount: Number(e.target.value) })} /></label>
+        <button className="btn-gold" onClick={() => void addExpense()}>{tr(lang, "Save expense", "খরচ সংরক্ষণ করুন")}</button>
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Expenses (recent)", "খরচ (সাম্প্রতিক)")}</b>
+        {expInPeriod.length === 0 ? <p className="small muted">{tr(lang, "No expenses in this period.", "এই সময়ে কোনো খরচ নেই।")}</p> : expInPeriod.slice(0, 50).map((e) => (
+          <p key={e.id} className="small">{e.date} • {e.category} • {e.description} — {tk(e.amount)} <button className="btn-danger" style={{ padding: "2px 8px" }} onClick={() => { if (!firestore) return; void deleteDoc(doc(firestore, "expenses", e.id)); audit(userDoc, "expense.delete", `${e.category} — ${e.description} ৳${e.amount}`); }}>{tr(lang, "Delete", "মুছুন")}</button></p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Owner Control Panel (Super Admin only): the business at a glance,
+// staff & permissions summary, and quick links to the owner-only tabs.
+function OwnerTab({ userDoc, orders, products, lang, onGoTab }: { userDoc: UserDoc; orders: Order[]; products: Product[]; lang: Lang; onGoTab: (t: string) => void }) {
+  const firestore = getDb();
+  const { data: users } = useLive<UserDoc>(() => (firestore ? query(collection(firestore, "users"), orderBy("createdAt", "desc"), limit(100)) : null), userFromDoc);
+  const staff = users.filter((u) => u.role !== "customer");
+  const todayOrders = orders.filter((o) => dayKey(o.createdAt) === todayKey() && LIVE_ORDER(o));
+  const todayRevenue = realized(todayOrders);
+  const monthRevenue = realized(orders.filter((o) => o.createdAt.slice(0, 7) === todayKey().slice(0, 7)));
+  const lowStock = products.filter((p) => p.stock <= 5);
+  const pending = orders.filter((o) => o.status === "Pending").length;
+  const best = (() => {
+    const m = new Map<string, { name: string; qty: number }>();
+    orders.filter(LIVE_ORDER).forEach((o) => o.items.forEach((it) => { const cur = m.get(it.productId) ?? { name: it.name, qty: 0 }; cur.qty += it.qty; m.set(it.productId, cur); }));
+    return [...m.values()].sort((a, b) => b.qty - a.qty)[0] ?? null;
+  })();
+  return (
+    <div>
+      <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Owner Control Panel", "মালিক প্যানেল")}</h3>
+      <p className="small muted">{tr(lang, "Only the Super Admin (owner) sees this. Financial figures and important settings live here and in the owner-only tabs — staff never see them.", "এটি শুধু সুপার অ্যাডমিন (মালিক) দেখতে পারেন। আর্থিক তথ্য ও গুরুত্বপূর্ণ সেটিংস এখানে ও মালিকের ট্যাবে থাকে — স্টাফরা এগুলো দেখতে পান না।")}</p>
+      <div className="grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginTop: 10 }}>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(todayRevenue)}</b><p className="small">{tr(lang, "Revenue today", "আজকের আয়")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(monthRevenue)}</b><p className="small">{tr(lang, "Revenue this month", "এই মাসের আয়")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{todayOrders.length}</b><p className="small">{tr(lang, "Orders today", "আজকের অর্ডার")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{pending}</b><p className="small">{tr(lang, "Pending orders", "অপেক্ষমাণ অর্ডার")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{lowStock.length}</b><p className="small">{tr(lang, "Low-stock products", "কম স্টকের প্রোডাক্ট")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{staff.length}</b><p className="small">{tr(lang, "Staff accounts", "স্টাফ অ্যাকাউন্ট")}</p></div>
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Best seller (all time)", "সেরা বিক্রি (সব সময়)")}</b>
+        <p className="small">{best ? `${best.name} × ${best.qty}` : tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>
+        <b>{tr(lang, "Low stock", "কম স্টক")}</b>
+        {lowStock.length === 0 ? <p className="small muted">{tr(lang, "No product is at or below 5 in stock.", "কোনো প্রোডাক্টের স্টক ৫ বা তার নিচে নেই।")}</p> : lowStock.slice(0, 5).map((p) => <p key={p.slug} className="small">{p.nameEn} — {p.stock} {tr(lang, "left", "বাকি")}</p>)}
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Staff & permissions", "স্টাফ ও অনুমতি")}</b>
+        <p className="small muted">{tr(lang, "Cashiers, kitchen and waiters see only the tabs for their own work — never money figures, roles or settings. Change a role in Users & Staff.", "ক্যাশিয়ার, কিচেন ও ওয়েটার শুধু নিজের কাজের ট্যাব দেখেন — আয়, রোল বা সেটিংস কখনো দেখেন না। রোল বদলাতে Users & Staff-এ যান।")}</p>
+        {staff.length === 0 ? <p className="small muted">{tr(lang, "No staff accounts yet.", "এখনো কোনো স্টাফ অ্যাকাউন্ট নেই।")}</p> : staff.map((u) => <p key={u.id} className="small">{u.name} • {u.email} • {u.role}{u.email.toLowerCase() === OWNER_EMAIL ? ` (${tr(lang, "Super Admin", "সুপার অ্যাডমিন")})` : ""}</p>)}
+        <button className="btn-gold" style={{ marginTop: 8 }} onClick={() => onGoTab("users")}>{tr(lang, "Open Users & Staff", "Users & Staff খুলুন")}</button>
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Quick links", "দ্রুত লিংক")}</b>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="btn-gold" onClick={() => onGoTab("finance")}>{tr(lang, "Finance", "আয়-ব্যয়")}</button>
+          <button className="btn-gold" onClick={() => onGoTab("analytics")}>{tr(lang, "Analytics", "অ্যানালাইসিস")}</button>
+          <button className="btn-gold" onClick={() => onGoTab("ads")}>{tr(lang, "Ads", "বিজ্ঞাপন")}</button>
+          <button className="btn-gold" onClick={() => onGoTab("settings")}>{tr(lang, "Settings", "সেটিংস")}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function AdminPanel({ fbUser, userDoc, settings, categories, products, lang, onBack, onSeed, seedBusy, seedMsg, signInCard }: {
   fbUser: User | null; userDoc: UserDoc | null; settings: Settings; categories: Category[]; products: Product[];
@@ -589,13 +859,13 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
 }) {
   const [tab, setTab] = useState("dashboard");
   const firestore = getDb();
-  const { data: orders } = useLive<Order>(() => (firestore && userDoc && isStaffRole(userDoc.role) ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(100)) : null), orderFromDoc);
+  const { data: orders } = useLive<Order>(() => (firestore && userDoc && isStaffRole(userDoc.role) ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(500)) : null), orderFromDoc);
 
   if (!fbUser) {
     return (
       <div>
         <h2 className="serif" style={{ fontSize: 24 }}>{tr(lang, "Admin panel — staff sign-in", "অ্যাডমিন প্যানেল — স্টাফ সাইন-ইন")}</h2>
-        <p className="small muted">{tr(lang, "Sign in with Google, Facebook or phone. Your staff role (from your user record) decides what you can do here. Customer accounts see only the access-denied message below.", "Google, Facebook বা ফোনে সাইন-ইন করুন। আপনার স্টাফ রোল (ইউজার রেকর্ড থেকে) এখানে কী করতে পারবেন তা ঠিক করে। কাস্টমার অ্যাকাউন্ট শুধু নিচের নিষেধ-বার্তা দেখবে।")}</p>
+        <p className="small muted">{tr(lang, "Sign in with Google, Facebook or phone. Your staff role (from your user record) decides what you can do here.", "Google, Facebook বা ফোনে সাইন-ইন করুন। আপনার স্টাফ রোল (ইউজার রেকর্ড থেকে) এখানে কী করতে পারবেন তা ঠিক করে।")}</p>
         <div style={{ marginTop: 12 }}>{signInCard}</div>
       </div>
     );
@@ -603,34 +873,47 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
   if (!userDoc) {
     return <p className="muted">{tr(lang, "Setting up your account…", "আপনার অ্যাকাউন্ট তৈরি হচ্ছে…")}</p>;
   }
-  if (!isStaffRole(userDoc.role)) {
-    return (
-      <div className="card" style={{ padding: 18, textAlign: "center" }}>
-        <h2 className="serif" style={{ fontSize: 24 }}>{tr(lang, "Access denied", "প্রবেশ নিষেধ")}</h2>
-        <p>{tr(lang, "This panel is for staff only. Your account is a customer account — it can order from the shop, but it cannot open or manage the admin panel. A staff role is given by an admin in Users & Staff.", "এই প্যানেল শুধু স্টাফের জন্য। আপনার অ্যাকাউন্ট কাস্টমার অ্যাকাউন্ট — দোকান থেকে অর্ডার করা যাবে, কিন্তু অ্যাডমিন প্যানেল খোলা বা পরিচালনা করা যাবে না। স্টাফ রোল অ্যাডমিন Users & Staff-এ দেন।")}</p>
-        <button className="btn-gold" onClick={onBack}>{tr(lang, "Back to the shop", "দোকানে ফিরুন")}</button>
-      </div>
-    );
-  }
-  const revenue = orders.filter((o) => o.status === "Completed" || o.status === "Delivered").reduce((a, o) => a + o.total, 0);
+  // A signed-in account without a staff role never sees this panel:
+  // the customer app sends it back to the shop silently, so this
+  // renders nothing — no denial text, no admin mention.
+  if (!isStaffRole(userDoc.role)) return null;
+  const revenue = realized(orders);
   const lowStock = products.filter((p) => p.stock <= 5);
+  const owner = isOwnerDoc(userDoc);
+  const visibleTabs = ADMIN_TABS.filter((t) => (!t.ownerOnly || owner) && t.roles.includes(userDoc.role));
+  const activeTab = visibleTabs.some((t) => t.id === tab) ? tab : visibleTabs[0]?.id ?? "dashboard";
+  const todayOrders = orders.filter((o) => dayKey(o.createdAt) === todayKey() && LIVE_ORDER(o));
+  const todayRevenue = realized(todayOrders);
+  const todayBest = (() => {
+    const m = new Map<string, { name: string; qty: number }>();
+    todayOrders.forEach((o) => o.items.forEach((it) => { const cur = m.get(it.productId) ?? { name: it.name, qty: 0 }; cur.qty += it.qty; m.set(it.productId, cur); }));
+    return [...m.values()].sort((a, b) => b.qty - a.qty)[0] ?? null;
+  })();
   return (
     <div className="admin-shell">
       <nav className="admin-nav" aria-label="Admin">
         <p className="serif" style={{ fontSize: 18, margin: 0 }}>{tr(lang, "Admin panel", "অ্যাডমিন প্যানেল")}</p>
-        <p className="small muted" style={{ margin: 0 }}>{userDoc.name} • {userDoc.role}</p>
-        {ADMIN_TABS.map(([id, en, bn]) => <button key={id} className={`chip ${tab === id ? "chip-on" : ""}`} onClick={() => setTab(id)}>{lang === "bn" ? bn : en}</button>)}
+        <p className="small muted" style={{ margin: 0 }}>{userDoc.name} • {owner ? tr(lang, "Super Admin (Owner)", "সুপার অ্যাডমিন (মালিক)") : userDoc.role}</p>
+        {visibleTabs.map((t) => <button key={t.id} className={`chip ${activeTab === t.id ? "chip-on" : ""}`} onClick={() => setTab(t.id)}>{lang === "bn" ? t.bn : t.en}</button>)}
         <button className="btn-ghost" onClick={onBack}>{tr(lang, "Back to shop", "দোকানে ফিরুন")}</button>
       </nav>
       <div>
-        {tab === "dashboard" && (
+        {activeTab === "owner" && <OwnerTab userDoc={userDoc} orders={orders} products={products} lang={lang} onGoTab={(t) => setTab(t)} />}
+        {activeTab === "dashboard" && (
           <div>
             <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Dashboard", "ড্যাশবোর্ড")}</h3>
             <div className="grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginTop: 10 }}>
-              <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{orders.length}</b><p className="small">{tr(lang, "Orders (recent 100)", "অর্ডার (সাম্প্রতিক ১০০)")}</p></div>
-              <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(revenue)}</b><p className="small">{tr(lang, "Completed / Delivered revenue", "সম্পন্ন / ডেলিভার্ড আয়")}</p></div>
+              <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{orders.length}</b><p className="small">{tr(lang, "Orders (recent 500)", "অর্ডার (সাম্প্রতিক ৫০০)")}</p></div>
               <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{orders.filter((o) => o.status === "Pending").length}</b><p className="small">{tr(lang, "Pending orders", "অপেক্ষমাণ অর্ডার")}</p></div>
+              <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{todayOrders.length}</b><p className="small">{tr(lang, "Orders today", "আজকের অর্ডার")}</p></div>
             </div>
+            {owner && (
+              <div className="grid" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginTop: 10 }}>
+                <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(todayRevenue)}</b><p className="small">{tr(lang, "Revenue today", "আজকের আয়")}</p></div>
+                <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(revenue)}</b><p className="small">{tr(lang, "Total revenue (Completed / Delivered)", "মোট আয় (সম্পন্ন / ডেলিভার্ড)")}</p></div>
+                <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{todayBest ? `${todayBest.name} × ${todayBest.qty}` : "—"}</b><p className="small">{tr(lang, "Best seller today", "আজকের সেরা বিক্রি")}</p></div>
+              </div>
+            )}
             <div className="card" style={{ padding: 14, marginTop: 12 }}>
               <b>{tr(lang, "Low stock", "কম স্টক")}</b>
               {lowStock.length === 0 ? <p className="small muted">{tr(lang, "No product is at or below 5 in stock.", "কোনো প্রোডাক্টের স্টক ৫ বা তার নিচে নেই।")}</p> : lowStock.map((p) => <p key={p.slug} className="small">{p.nameEn} — {p.stock} {tr(lang, "left", "বাকি")}</p>)}
@@ -641,17 +924,20 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
             </div>
           </div>
         )}
-        {tab === "orders" && <OrdersTab userDoc={userDoc} products={products} lang={lang} />}
-        {tab === "pos" && <PosTab userDoc={userDoc} products={products} settings={settings} lang={lang} />}
-        {tab === "products" && <ProductsTab userDoc={userDoc} categories={categories} products={products} lang={lang} />}
-        {tab === "reservations" && <ReservationsTab userDoc={userDoc} lang={lang} />}
-        {tab === "coupons" && <CouponsTab userDoc={userDoc} lang={lang} />}
-        {tab === "content" && <ContentTab userDoc={userDoc} settings={settings} lang={lang} />}
-        {tab === "settings" && <SettingsTab userDoc={userDoc} settings={settings} lang={lang} />}
-        {tab === "users" && <UsersTab userDoc={userDoc} lang={lang} />}
-        {tab === "support" && <SupportTab userDoc={userDoc} products={products} lang={lang} />}
-        {tab === "inventory" && <InventoryTab userDoc={userDoc} lang={lang} />}
-        {tab === "firebase" && <FirebaseTab userDoc={userDoc} lang={lang} onSeed={onSeed} seedBusy={seedBusy} seedMsg={seedMsg} />}
+        {activeTab === "orders" && <OrdersTab userDoc={userDoc} products={products} lang={lang} />}
+        {activeTab === "pos" && <PosTab userDoc={userDoc} products={products} settings={settings} lang={lang} />}
+        {activeTab === "products" && <ProductsTab userDoc={userDoc} categories={categories} products={products} lang={lang} />}
+        {activeTab === "reservations" && <ReservationsTab userDoc={userDoc} lang={lang} />}
+        {activeTab === "coupons" && <CouponsTab userDoc={userDoc} lang={lang} />}
+        {activeTab === "analytics" && <AnalyticsTab orders={orders} products={products} categories={categories} lang={lang} />}
+        {activeTab === "finance" && <FinanceTab userDoc={userDoc} orders={orders} lang={lang} />}
+        {activeTab === "ads" && <AdsTab userDoc={userDoc} settings={settings} lang={lang} />}
+        {activeTab === "content" && <ContentTab userDoc={userDoc} settings={settings} lang={lang} />}
+        {activeTab === "settings" && <SettingsTab userDoc={userDoc} settings={settings} lang={lang} />}
+        {activeTab === "users" && <UsersTab userDoc={userDoc} lang={lang} />}
+        {activeTab === "support" && <SupportTab userDoc={userDoc} products={products} lang={lang} />}
+        {activeTab === "inventory" && <InventoryTab userDoc={userDoc} lang={lang} />}
+        {activeTab === "firebase" && <FirebaseTab userDoc={userDoc} lang={lang} onSeed={onSeed} seedBusy={seedBusy} seedMsg={seedMsg} />}
       </div>
     </div>
   );
