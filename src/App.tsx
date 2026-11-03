@@ -203,10 +203,11 @@ function SignInCard({ lang, onSignedIn }: { lang: Lang; onSignedIn: () => void }
     onSignedIn();
   };
   return (
-    <div className="card p-5" style={{ maxWidth: 480, margin: "0 auto" }}>
+    <div className="login-hero">
+      <div className="glass-login">
       <div className="logo-tile mx-auto" style={{ width: 88, height: 88 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></div>
       <h1 className="serif text-center" style={{ fontSize: 24, marginTop: 10 }}>{tr(lang, "Log in to Café Reza", "ক্যাফে রেজা-এ লগইন করুন")}</h1>
-      <p className="small muted text-center">{tr(lang, "Sign in with Google, Facebook or your phone number. New accounts are always customers. No password, no email verification step.", "Google, Facebook বা ফোন নম্বর দিয়ে সাইন-ইন করুন। নতুন অ্যাকাউন্ট সবসময় কাস্টমার। কোনো পাসওয়ার্ড ও কোনো ইমেইল যাচাইয়ের ধাপ নেই।")}</p>
+      <p className="small muted text-center">{tr(lang, "Sign in with Google, Facebook or your phone number — new here? The same buttons create your account. New accounts are always customers. No password, no email verification step.", "Google, Facebook বা ফোন নম্বর দিয়ে সাইন-ইন করুন — নতুন হলে একই বোতামে অ্যাকাউন্ট তৈরি হবে। নতুন অ্যাকাউন্ট সবসময় কাস্টমার। কোনো পাসওয়ার্ড ও কোনো ইমেইল যাচাইয়ের ধাপ নেই।")}</p>
       <button type="button" disabled={busy} className="btn-ghost" style={{ width: "100%", marginTop: 14, background: "#fff", color: "#24150f", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px" }} onClick={() => void onSocial("google")} aria-label="Login with Gmail"><GoogleG /> Login with Gmail</button>
       <button type="button" disabled={busy} style={{ width: "100%", marginTop: 8, background: "#1877f2", color: "#fff", border: "none", borderRadius: 999, padding: "12px", fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }} onClick={() => void onSocial("facebook")} aria-label="Continue with Facebook"><span aria-hidden="true" style={{ display: "flex", width: 20, height: 20, borderRadius: "50%", background: "#fff", color: "#1877f2", alignItems: "center", justifyContent: "center", fontWeight: 800 }}>f</span>{tr(lang, "Continue with Facebook", "Facebook দিয়ে চালিয়ে যান")}</button>
       {!showPhone && <button type="button" className="btn-gold" style={{ width: "100%", marginTop: 8 }} onClick={() => setShowPhone(true)}>{tr(lang, "Continue with phone number", "ফোন নম্বর দিয়ে চালিয়ে যান")}</button>}
@@ -223,6 +224,7 @@ function SignInCard({ lang, onSignedIn }: { lang: Lang; onSignedIn: () => void }
       )}
       {note && <p className="small" role="status" style={{ marginTop: 10 }}>{note}</p>}
       {err && <p className="small" role="alert" style={{ marginTop: 10, color: "var(--bad)" }}>{err}</p>}
+      </div>
     </div>
   );
 }
@@ -484,7 +486,7 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
   );
 }
 
-function AccountView({ fbUser, userDoc, products, lang }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; lang: Lang }) {
+function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; lang: Lang; onLoginSuccess: () => void }) {
   const firestore = getDb();
   const { data: orders } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
@@ -493,7 +495,7 @@ function AccountView({ fbUser, userDoc, products, lang }: { fbUser: User | null;
   const [addrDraft, setAddrDraft] = useState("");
   const [msgDraft, setMsgDraft] = useState("");
   const [msgDone, setMsgDone] = useState("");
-  if (!fbUser) return <SignInCard lang={lang} onSignedIn={() => undefined} />;
+  if (!fbUser) return <SignInCard lang={lang} onSignedIn={onLoginSuccess} />;
   const contact = userDoc?.phone ? userDoc.phone : (fbUser.email ?? fbUser.phoneNumber ?? "");
   const sendMessage = async () => {
     if (!firestore || !msgDraft.trim()) return;
@@ -566,6 +568,8 @@ export function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [view, setView] = useState<View>("store");
   const [fbUser, setFbUser] = useState<User | null>(null);
+  const [loginSuccess, setLoginSuccess] = useState(false);
+  const onLoginSuccess = () => { setLoginSuccess(true); window.setTimeout(() => setLoginSuccess(false), 1500); };
   const [userDoc, setUserDoc] = useState<UserDoc | null>(null);
   const [cat, setCat] = useState("all");
   const [q, setQ] = useState("");
@@ -655,6 +659,12 @@ export function App() {
   const showSetupNotice = !isFirebaseConfigured;
   return (
     <div style={{ paddingBottom: 84 }}>
+      {loginSuccess && (
+        <div className="success-overlay" role="status">
+          <div className="success-tick">✓</div>
+          <div style={{ fontSize: 24, fontWeight: 600 }}>{tr(lang, "Login successful!", "লগইন সফল হয়েছে!")}</div>
+        </div>
+      )}
       <header className="topbar no-print">
         <div className="wrap row" style={{ justifyContent: "space-between", paddingTop: 10, paddingBottom: 10 }}>
           <button type="button" onClick={() => navigate("store")} style={{ background: "none", border: "none", display: "flex", gap: 10, alignItems: "center", textAlign: "left", color: "var(--text)" }}>
@@ -686,7 +696,7 @@ export function App() {
 
       {view === "admin" ? (
         <main className="wrap" style={{ marginTop: 14 }}>
-          <AdminPanel fbUser={fbUser} userDoc={userDoc} settings={settings} categories={categories} products={products} lang={lang} onBack={() => navigate("store")} onSeed={runSeed} seedBusy={seedBusy} seedMsg={seedMsg} signInCard={<SignInCard lang={lang} onSignedIn={() => undefined} />} />
+          <AdminPanel fbUser={fbUser} userDoc={userDoc} settings={settings} categories={categories} products={products} lang={lang} onBack={() => navigate("store")} onSeed={runSeed} seedBusy={seedBusy} seedMsg={seedMsg} signInCard={<SignInCard lang={lang} onSignedIn={onLoginSuccess} />} />
         </main>
       ) : view === "track" ? (
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><TrackView key={fbUser?.uid ?? "guest"} fbUser={fbUser} lang={lang} /></main>
@@ -694,7 +704,7 @@ export function App() {
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><ReserveView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} lang={lang} /></main>
       ) : view === "account" ? (
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}>
-          <AccountView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} products={products} lang={lang} />
+          <AccountView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} products={products} lang={lang} onLoginSuccess={onLoginSuccess} />
           <InstallAppCard variant="customer" lang={lang} />
         </main>
       ) : view === "info" ? (
