@@ -1,0 +1,37 @@
+name: Unzip source archive
+on:
+  workflow_dispatch:
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract source files
+        run: |
+          set -e
+          unzip -o cafe-reza-github.zip -d extracted
+          echo "--- extracted tree ---"
+          find extracted | head -n 200
+          SRC="extracted"
+          COUNT=$(find extracted -mindepth 1 -maxdepth 1 | wc -l)
+          if [ "$COUNT" = "1" ]; then
+            ONLY=$(find extracted -mindepth 1 -maxdepth 1)
+            if [ -d "$ONLY" ]; then
+              SRC="$ONLY"
+            fi
+          fi
+          echo "Source root: $SRC"
+          cp -a "$SRC"/. .
+          rm -rf extracted cafe-reza-github.zip
+          echo "--- repo root ---"
+          ls -la
+      - name: Commit extracted files
+        run: |
+          git config user.name "rezamdyeasin-jpg"
+          git config user.email "rezamdyeasin@gmail.com"
+          git add -A
+          git status --short
+          git commit -m "Extract Cafe Reza source files" || echo "Nothing to commit"
+          git push
