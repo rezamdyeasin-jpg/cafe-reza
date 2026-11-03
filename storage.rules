@@ -1,5 +1,5 @@
 rules_version = '2';
-// Cafe Reza — strict Storage rules. Deploy with:
+// Café Reza — strict Storage rules. Deploy with:
 //   firebase deploy --only storage
 // Deny by default. Product images: public read, staff-only write,
 // images only, 5 MB max. Private user files: owner only. Everything

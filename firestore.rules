@@ -1,62 +1,77 @@
 rules_version = '2';
-// Cafe Reza — strict Firestore rules. Deploy with:
-//   firebase deploy --only firestore:rules
-// (Firebase CLI, logged in as the project owner; project: cafe-reza,
-//  database: (default), location asia-south1.)
+// Café Reza — standalone Firebase build (project cafe-reza, Firestore
+// asia-south1, database (default)). Deploy with:
+//   firebase deploy --only firestore:rules,storage
+//   (Firebase CLI, signed in as the project owner.)
 //
-// Deny by default: every path below is closed unless a rule explicitly
-// allows it. Roles come from Firebase Auth custom claims
-// (request.auth.token.role) when set by the owner via the Admin SDK, and
-// fall back to the role field of the caller's /users/{uid} document.
-// User documents must be keyed by Firebase UID with a `role` field
-// (admin | manager | cashier | kitchen | waiter | delivery | inventory |
-// customer). Prices, stock, roles and payment status are never writable
-// by a client: product/settings writes are admin-only, and order totals
-// are computed server-side — a client order document may not set totals.
+// Deny by default. Roles come from the caller's /users/{uid} document
+// (`role`: admin | manager | cashier | kitchen | waiter | delivery |
+// inventory | customer), falling back to the Firebase Auth custom claim
+// `role` when the owner sets one with the Admin SDK. The owner email
+// below is the pinned Super Admin from the cafe's own records: only
+// that email may create its own users document with role "admin"
+// (first-admin bootstrap, no service account needed). The pinned
+// customer email may never be given a staff role. Prices, stock and
+// payment status are never writable by customers: catalog/settings
+// writes are admin-only, and only managers/admins change payment
+// status. Totals are computed in the app from the Firestore product
+// documents it has just read at checkout and must be verified by staff
+// before an order is confirmed — there is no Cloud Function in this
+// Spark-plan build to recompute them server-side (see README.md).
 //
-// App Check: enable enforcement in Firebase Console → App Check →
-// Firestore (after adding the reCAPTCHA Enterprise site key to the
-// hosting environment as VITE_FIREBASE_APPCHECK_KEY). Rules alone cannot
-// enforce App Check; enforcement is a console setting.
+// Ordering and reservations need a signed-in account. Firestore rules
+// cannot verify a phone number without a server, so guest checkout
+// would leave every guest order readable by anyone; signed-in orders
+// stay private to their owner and staff. Google sign-in is one tap.
 //
-// These rules are NOT live until deployed. Until then Firestore stays in
-// Production mode (all reads/writes denied) and the app reports that
-// honestly instead of pretending the connection works.
+// These rules are NOT live until deployed. Until then Firestore stays
+// in Production mode (all reads/writes denied) and the app reports
+// that honestly instead of pretending the connection works.
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
-    function role() {
-      return request.auth != null && request.auth.token.keys().hasAny(['role'])
+    function userRole() {
+      return signedIn() && request.auth.token.keys().hasAny(['role'])
         ? request.auth.token.role
-        : (signedIn() ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role : null);
+        : (signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+          : null);
     }
-    function isAdmin() { return role() == 'admin'; }
-    function isManager() { return role() == 'manager' || isAdmin(); }
-    function isStaff() { return role() in ['admin', 'manager', 'cashier', 'kitchen', 'waiter', 'delivery', 'inventory']; }
+    function isAdmin() { return userRole() == 'admin'; }
+    function isManager() { return userRole() == 'manager' || isAdmin(); }
+    function isStaff() { return userRole() in ['admin', 'manager', 'cashier', 'kitchen', 'waiter', 'delivery', 'inventory']; }
     function isOwner(userId) { return signedIn() && request.auth.uid == userId; }
+    function isOwnerEmail() { return signedIn() && request.auth.token.email == 'rezamdyeasin@gmail.com'; }
+    function changedKeys() { return request.resource.data.diff(resource.data).affectedKeys(); }
 
-    // Default deny — nothing else in this file can widen this catch-all
-    // because more specific matches below take precedence only for the
-    // collections they name.
+    // Default deny.
     match /{document=**} {
       allow read, write: if false;
     }
 
     // Users: each user reads/updates only their own profile, and may
-    // never change role, loyalty points, status or firebaseUid.
+    // never change role, loyalty points, status or email on their own.
+    // Admins manage roles/status, but can never move the pinned owner
+    // off admin or the pinned customer onto a staff role.
     match /users/{userId} {
       allow read: if isOwner(userId) || isStaff();
       allow create: if isOwner(userId)
-        && request.resource.data.role == 'customer'
-        && !request.resource.data.keys().hasAny(['loyaltyPoints', 'status', 'firebaseUid']);
-      allow update: if isOwner(userId)
-        && !request.resource.data.diff(resource.data).affectedKeys()
-          .hasAny(['role', 'loyaltyPoints', 'status', 'firebaseUid']);
+        && (request.resource.data.email == request.auth.token.email
+          || request.resource.data.email == request.auth.token.phone_number)
+        && (request.resource.data.role == 'customer' || (isOwnerEmail() && request.resource.data.role == 'admin'))
+        && !request.resource.data.keys().hasAny(['loyaltyPoints', 'status']);
+      allow update: if (isOwner(userId)
+          && !changedKeys().hasAny(['role', 'loyaltyPoints', 'status', 'email']))
+        || (isAdmin()
+          && request.resource.data.email == resource.data.email
+          && !(resource.data.email == 'rezamdyeasin@gmail.com' && request.resource.data.role != 'admin')
+          && !(resource.data.email == 'yeasinreza81@gmail.com' && request.resource.data.role != 'customer'));
       allow delete: if false;
-      allow read, write: if isAdmin();
     }
 
-    // Catalog: public read; only admins write prices/stock/visibility.
+    // Catalog + settings + coupons: public read; only admins write.
+    // The customer site reads these live, so every admin edit here
+    // controls the customer panel at once — there is no second copy.
     match /products/{id} {
       allow read: if true;
       allow create, update, delete: if isAdmin();
@@ -66,7 +81,7 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
     match /coupons/{id} {
-      allow read: if signedIn();
+      allow read: if true;
       allow create, update, delete: if isAdmin();
     }
     match /settings/{id} {
@@ -74,42 +89,63 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
 
-    // Orders: customers create only their own orders and may not set
-    // server-computed money fields; they read only their own orders and
-    // never update them. Staff read all; only admin/manager change
-    // payment status; status changes follow the staff workflow.
+    // Orders: customers create only their own orders, always Pending /
+    // Unpaid. Staff read all; only staff change status; only
+    // admin/manager change payment status; totals and items are never
+    // editable after creation.
     match /orders/{id} {
       allow read: if isOwner(resource.data.userId) || isStaff();
       allow create: if signedIn()
         && request.resource.data.userId == request.auth.uid
-        && !request.resource.data.keys().hasAny(['total', 'subtotal', 'discount', 'vat', 'deliveryFee', 'paymentStatus', 'status']);
+        && request.resource.data.items.size() > 0
+        && request.resource.data.keys().hasAll(['customerName', 'phone', 'items', 'total'])
+        && (isStaff() || (request.resource.data.status == 'Pending' && request.resource.data.paymentStatus == 'Unpaid'));
       allow update: if isStaff()
-        && !request.resource.data.diff(resource.data).affectedKeys()
-          .hasAny(['total', 'subtotal', 'discount', 'vat', 'deliveryFee', 'items'])
-        && !(request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentStatus']) && !isManager());
+        && !changedKeys().hasAny(['total', 'subtotal', 'discount', 'vat', 'deliveryFee', 'items', 'userId'])
+        && !(changedKeys().hasAny(['paymentStatus']) && !isManager());
       allow delete: if false;
     }
 
-    // Reservations: guests create with their own phone; customers read
-    // only their own (by uid or matching phone on the document); staff
-    // manage all.
+    // Reservations: signed-in customers create their own; staff manage all.
     match /reservations/{id} {
       allow read: if isOwner(resource.data.userId) || isStaff();
-      allow create: if true;
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
       allow update: if isStaff();
       allow delete: if isAdmin();
     }
 
     // Private messages: the customer who owns the thread and staff only.
-    // A customer thread document is keyed by the customer's uid.
-    match /messages/{threadId} {
-      allow read, update: if isOwner(resource.data.userId) || isStaff();
+    match /messages/{id} {
+      allow read: if isOwner(resource.data.userId) || isStaff();
       allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isStaff();
       allow delete: if false;
-      match /items/{itemId} {
-        allow read, create: if isOwner(get(/databases/$(database)/documents/messages/$(threadId)).data.userId) || isStaff();
-        allow update, delete: if false;
-      }
+    }
+
+    // Support tickets: signed-in customers create their own; staff reply.
+    match /tickets/{id} {
+      allow read: if isOwner(resource.data.userId) || isStaff();
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    // Reviews: anyone reads approved reviews; customers create their
+    // own pending reviews; staff moderate.
+    match /reviews/{id} {
+      allow read: if resource.data.status == 'Approved' || isStaff();
+      allow create: if signedIn() && request.resource.data.status == 'Pending';
+      allow update: if isStaff();
+      allow delete: if isAdmin();
+    }
+
+    // Tables, shifts: staff areas.
+    match /tables/{id} {
+      allow read: if signedIn();
+      allow create, update, delete: if isStaff();
+    }
+    match /shifts/{id} {
+      allow read, write: if isStaff();
     }
 
     // Refund requests: staff create, admin/manager decide, nobody edits
@@ -132,29 +168,15 @@ service cloud.firestore {
       allow read, write: if isManager();
     }
 
-    // Audit log: append-only. Staff/admin read; only admins (or the
-    // server, with an admin token) create; updates and deletes forbidden.
+    // Audit log: append-only. Staff/admin read; only admins create;
+    // updates and deletes forbidden.
     match /auditLogs/{id} {
       allow read: if isStaff();
       allow create: if isAdmin();
       allow update, delete: if false;
     }
-    match /securityEvents/{id} {
-      allow read: if isManager();
-      allow create: if isAdmin();
-      allow update, delete: if false;
-    }
 
-    // Reviews: anyone reads approved reviews; customers create their
-    // own pending reviews; staff moderate.
-    match /reviews/{id} {
-      allow read: if resource.data.status == 'Approved' || isStaff();
-      allow create: if signedIn() && request.resource.data.status == 'Pending';
-      allow update: if isStaff();
-      allow delete: if isAdmin();
-    }
-
-    // Sync metadata written by the artifact's publish step.
+    // Sync metadata (last catalog seed / publish).
     match /meta/{id} {
       allow read: if isStaff();
       allow write: if isStaff();

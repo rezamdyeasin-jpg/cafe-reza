@@ -1,1 +1,0 @@
-ALTER TABLE "settings" ADD COLUMN "ads_json" TEXT NOT NULL DEFAULT '[]';

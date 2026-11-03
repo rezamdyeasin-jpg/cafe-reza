@@ -1,1 +1,0 @@
-UPDATE "settings" SET "tagline" = 'On a mission to serve fresh, healthy & tasty food.' WHERE "id" = 1 AND ("tagline" = 'Premium coffee, faluda & momo.' OR "tagline" = 'Premium coffee, faluda & momo — made fresh in Cumilla.');
