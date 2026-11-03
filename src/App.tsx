@@ -113,8 +113,8 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
       onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}
       onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ touchAction: "pan-y" }}>
       <button type="button" onClick={() => onSelect(product)} className="block w-full text-left" style={{ background: "none", border: "none", padding: 0 }}>
-        <div className="banner-slide relative" style={{ background: "#0d0906", height: "min(78vw, 340px)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <img src={`/img/${slide.img}`} alt={slide.alt} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }} />
+        <div className="banner-slide relative" style={{ background: "#0d0906", height: "min(44vw, 200px)" }}>
+          <img src={`/img/${slide.img}`} alt={slide.alt} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
         </div>
         <div className="flex items-center justify-between px-3 py-2" style={{ background: "rgba(22,15,12,.72)", color: "#f5ebdd", gap: 8, flexWrap: "nowrap", height: 40 }}>
           <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{displayName(product, lang)}</b><span style={{ flex: "none" }}>{orderable(product) ? tk(effPrice(product)) : tr(lang, "Price coming soon", "দাম আসছে")}</span>
@@ -122,7 +122,6 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
       </button>
       <div className="row px-3 py-2" style={{ justifyContent: "space-between" }}>
         <button className="chip" aria-label="Previous banner" onClick={() => setIdx((i) => (i - 1 + slides.length) % slides.length)}>←</button>
-        <div className="row">{slides.map((s, i) => <button key={s.slug} className={`chip ${i === idx % slides.length ? "chip-on" : ""}`} style={{ padding: "4px 9px" }} aria-label={`Banner ${i + 1}: ${s.slug}`} onClick={() => setIdx(i)}>•</button>)}</div>
         <button className="chip" aria-label="Next banner" onClick={() => setIdx((i) => (i + 1) % slides.length)}>→</button>
       </div>
     </div>
@@ -715,9 +714,9 @@ export function App() {
             </div>
           </section>
 
-          <InstallAppCard variant="customer" lang={lang} />
           <AdSlotView slotId="home-banner" adsJson={settings.adsJson} />
           <BannerCarousel products={products} onSelect={(p) => setDetail(p)} lang={lang} />
+          <InstallAppCard variant="customer" lang={lang} />
 
           <div className="row" style={{ marginTop: 18 }} role="tablist" aria-label="Categories">
             <button className={`chip ${cat === "all" ? "chip-on" : ""}`} onClick={() => setCat("all")}>{tr(lang, "All", "সব")}</button>
