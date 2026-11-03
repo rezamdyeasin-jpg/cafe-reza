@@ -1,0 +1,38 @@
+name: Replace with Firebase code
+on:
+  workflow_dispatch:
+jobs:
+  replace:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wipe old files and extract Firebase code
+        run: |
+          set -e
+          unzip -o cafe-reza-firebase.zip -d extracted
+          echo "--- extracted tree ---"
+          find extracted | head -n 200
+          SRC="extracted"
+          COUNT=$(find extracted -mindepth 1 -maxdepth 1 | wc -l)
+          if [ "$COUNT" = "1" ]; then
+            ONLY=$(find extracted -mindepth 1 -maxdepth 1)
+            if [ -d "$ONLY" ]; then
+              SRC="$ONLY"
+            fi
+          fi
+          echo "Source root: $SRC"
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name 'extracted' -exec rm -rf {} +
+          cp -a "$SRC"/. .
+          rm -rf extracted
+          echo "--- repo root ---"
+          ls -la
+      - name: Commit new code
+        run: |
+          git config user.name "rezamdyeasin-jpg"
+          git config user.email "rezamdyeasin@gmail.com"
+          git add -A
+          git status --short
+          git commit -m "Replace with Firebase standalone code" || echo "Nothing to commit"
+          git push
