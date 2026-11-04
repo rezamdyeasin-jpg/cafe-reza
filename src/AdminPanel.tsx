@@ -134,11 +134,20 @@ function RefundDecisions({ userDoc, lang }: { userDoc: UserDoc; products: Produc
 
 function PosTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; products: Product[]; settings: Settings; lang: Lang }) {
   const [cart, setCart] = useState<Array<{ slug: string; qty: number }>>([]);
-  const [cash, setCash] = useState(0);
+  const [cashText, setCashText] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const cash = Number(cashText) || 0;
+  const qtyBySlug = new Map(cart.map((c) => [c.slug, c.qty]));
   const lines = cart.map((c) => ({ product: products.find((p) => p.slug === c.slug), qty: c.qty })).filter((l): l is { product: Product; qty: number } => !!l.product);
+  // Excel-style live formulas: line = qty x unit price, total = sum of
+  // lines, change = cash - total. Nothing is typed twice; every number
+  // updates the moment a quantity changes.
   const total = lines.reduce((a, l) => a + (l.product.discountPrice ?? l.product.price) * l.qty, 0);
+  const change = Math.max(0, cash - total);
+  const inc = (slug: string) => setCart((prev) => { const cur = prev.find((c) => c.slug === slug); return cur ? prev.map((c) => (c.slug === slug ? { ...c, qty: c.qty + 1 } : c)) : [...prev, { slug, qty: 1 }]; });
+  const dec = (slug: string) => setCart((prev) => { const cur = prev.find((c) => c.slug === slug); if (!cur) return prev; return cur.qty <= 1 ? prev.filter((c) => c.slug !== slug) : prev.map((c) => (c.slug === slug ? { ...c, qty: c.qty - 1 } : c)); });
+  const removeLine = (slug: string) => setCart((prev) => prev.filter((c) => c.slug !== slug));
   const sell = async () => {
     if (!getDb() || lines.length === 0) return;
     if (cash < total) { setMsg(tr(lang, "Cash received is less than the total.", "পাওয়া টাকা মোটের চেয়ে কম।")); return; }
@@ -151,27 +160,50 @@ function PosTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; produ
     });
     setBusy(false);
     if (!r.ok) { setMsg(r.error ?? "Sale failed."); return; }
-    setMsg(tr(lang, `Sale done: ${r.orderNo}. Change: ${tk(cash - total)}.`, `বিক্রি হয়েছে: ${r.orderNo}। ফেরত: ${tk(cash - total)}।`));
-    setCart([]); setCash(0);
+    setMsg(tr(lang, `Sale done: ${r.orderNo}. Change: ${tk(change)}.`, `বিক্রি হয়েছে: ${r.orderNo}। ফেরত: ${tk(change)}।`));
+    setCart([]); setCashText("");
   };
   return (
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>POS</h3>
-      <div className="grid products" style={{ marginTop: 10 }}>
-        {products.filter((p) => p.available && (p.discountPrice ?? p.price) > 0).map((p) => (
-          <button key={p.slug} type="button" className="card" style={{ padding: 10, textAlign: "left", color: "var(--text)" }} onClick={() => setCart((prev) => { const i = prev.findIndex((c) => c.slug === p.slug); if (i >= 0) { const n = [...prev]; const cur = n[i]; if (cur) n[i] = { ...cur, qty: cur.qty + 1 }; return n; } return [...prev, { slug: p.slug, qty: 1 }]; })}>
-            <b>{displayName(p, lang)}</b><br /><span>{tk(p.discountPrice ?? p.price)}</span>
-          </button>
-        ))}
-      </div>
-      <div className="card" style={{ padding: 12, marginTop: 12 }}>
-        {lines.map((l) => <p key={l.product.slug}>{l.qty} × {displayName(l.product, lang)} — {tk((l.product.discountPrice ?? l.product.price) * l.qty)}</p>)}
-        <p><b>{tr(lang, "Total", "মোট")}: {tk(total)}</b></p>
-        <label>{tr(lang, "Cash received", "পাওয়া টাকা")}<input aria-label="Cash received" type="number" value={cash} onChange={(e) => setCash(Number(e.target.value))} /></label>
-        <p>{tr(lang, "Change:", "ফেরত:")} <b>{tk(Math.max(0, cash - total))}</b></p>
-        <button className="btn-gold" disabled={busy || lines.length === 0} onClick={() => void sell()}>{tr(lang, "Complete cash sale", "নগদ বিক্রি সম্পন্ন করুন")}</button>
-        <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setCart([])}>{tr(lang, "Clear", "মুছুন")}</button>
-        {msg && <p className="small" role="status">{msg}</p>}
+      <div className="pos-layout" style={{ marginTop: 10 }}>
+        <div className="grid products">
+          {products.filter((p) => p.available && (p.discountPrice ?? p.price) > 0).map((p) => {
+            const inCart = qtyBySlug.get(p.slug) ?? 0;
+            return (
+              <button key={p.slug} type="button" className="card" style={{ padding: 10, textAlign: "left", color: "var(--text)", position: "relative", boxShadow: inCart > 0 ? "0 0 0 2px var(--gold)" : undefined }} onClick={() => inc(p.slug)}>
+                {p.imageKey && <img src={`/img/${p.imageKey}`} alt="" loading="lazy" style={{ width: "100%", height: 64, objectFit: "cover", borderRadius: 8, marginBottom: 6 }} />}
+                <b>{displayName(p, lang)}</b><br /><span>{tk(p.discountPrice ?? p.price)}</span>
+                {inCart > 0 && <span style={{ position: "absolute", top: 6, right: 6, background: "var(--gold)", color: "#1a1207", borderRadius: 999, minWidth: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, padding: "0 6px" }}>×{inCart}</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div className="card pos-cart" style={{ padding: 12 }}>
+          {lines.length === 0 && <p className="small muted">{tr(lang, "Tap a product to add it.", "প্রোডাক্টে চাপ দিলে এখানে যোগ হবে।")}</p>}
+          {lines.map((l) => {
+            const price = l.product.discountPrice ?? l.product.price;
+            return (
+              <div key={l.product.slug} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
+                {l.product.imageKey && <img src={`/img/${l.product.imageKey}`} alt="" style={{ width: 36, height: 36, objectFit: "cover", borderRadius: 8, flexShrink: 0 }} />}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <b>{displayName(l.product, lang)}</b>
+                  <div className="small muted">{tk(price)} × {l.qty} = {tk(price * l.qty)}</div>
+                </div>
+                <button className="btn-ghost" style={{ padding: "4px 10px" }} onClick={() => dec(l.product.slug)} aria-label={tr(lang, "Decrease", "কমান")}>−</button>
+                <b style={{ minWidth: 20, textAlign: "center" }}>{l.qty}</b>
+                <button className="btn-ghost" style={{ padding: "4px 10px" }} onClick={() => inc(l.product.slug)} aria-label={tr(lang, "Increase", "বাড়ান")}>+</button>
+                <button className="btn-danger" style={{ padding: "4px 10px" }} onClick={() => removeLine(l.product.slug)} aria-label={tr(lang, "Remove", "সরান")}>✕</button>
+              </div>
+            );
+          })}
+          <p><b>{tr(lang, "Total", "মোট")}: {tk(total)}</b></p>
+          <label>{tr(lang, "Cash received", "পাওয়া টাকা")}<input aria-label="Cash received" type="number" value={cashText} onChange={(e) => setCashText(e.target.value)} /></label>
+          <p>{tr(lang, "Change:", "ফেরত:")} <b>{tk(change)}</b></p>
+          <button className="btn-gold" disabled={busy || lines.length === 0} onClick={() => void sell()}>{tr(lang, "Complete cash sale", "নগদ বিক্রি সম্পন্ন করুন")}</button>
+          <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setCart([])}>{tr(lang, "Clear all", "সব মুছুন")}</button>
+          {msg && <p className="small" role="status">{msg}</p>}
+        </div>
       </div>
     </div>
   );

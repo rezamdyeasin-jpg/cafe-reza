@@ -49,6 +49,8 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
 .admin-nav { display: flex; flex-direction: column; gap: 6px; }
 .admin-tabs-row { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
 @media (min-width: 860px) { .admin-nav { overflow: visible; position: sticky; top: 64px; align-self: start; } .admin-tabs-row { flex-direction: column; overflow: visible; } }
+.pos-layout { display: grid; grid-template-columns: 1fr; gap: 12px; }
+@media (min-width: 860px) { .pos-layout { grid-template-columns: minmax(0, 1fr) 340px; } .pos-cart { position: sticky; top: 64px; align-self: start; } }
 .admin-nav button { text-align: left; white-space: nowrap; }
 .bottomnav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; justify-content: space-around; background: var(--surface); border-top: 1px solid var(--border); padding: 8px 4px calc(8px + env(safe-area-inset-bottom)); }
 .bottomnav button { background: none; border: none; color: var(--text); font-size: 13px; padding: 6px 8px; }
