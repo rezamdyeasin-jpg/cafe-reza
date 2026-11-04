@@ -1,0 +1,48 @@
+name: Replace with Firebase code
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  replace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare extracted zip contents
+        run: |
+          mkdir -p extracted
+          ls -la
+          zipcount=$(find . -maxdepth 1 -name "*.zip" | wc -l)
+          echo "zipcount=$zipcount"
+          if [ "$zipcount" -ne 1 ]; then
+            echo "Expected exactly one .zip in the repo root" >&2
+            exit 1
+          fi
+          unzip -q "$(find . -maxdepth 1 -name '*.zip' | head -n 1)" -d extracted
+          if [ "$(find extracted -mindepth 1 -maxdepth 1 | wc -l)" = "1" ] && [ -d "$(find extracted -mindepth 1 -maxdepth 1)" ]; then
+            mv "$(find extracted -mindepth 1 -maxdepth 1)"/* extracted/ 2>/dev/null || true
+            mv "$(find extracted -mindepth 1 -maxdepth 1)"/.[!.]* extracted/ 2>/dev/null || true
+            rmdir "$(find extracted -mindepth 1 -maxdepth 1)" 2>/dev/null || true
+          fi
+          ls -la extracted
+
+      - name: Replace repo contents with extracted code
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name 'extracted' -exec rm -rf {} +
+          cp -a extracted/. .
+          rm -rf extracted
+          ls -la
+
+      - name: Commit replaced code
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Replace with Firebase code" || echo "Nothing to commit"
+          git push
