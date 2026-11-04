@@ -2,13 +2,13 @@
 :root {
   color-scheme: dark;
   --bg: #160f0c; --surface: #24150f; --surface2: #2e1d15; --text: #f5ebdd; --dim: #cbb9a6;
-  --border: #4a3325; --accent: #c6a15b; --accent2: #8b4a2f; --cream: #f5ebdd; --good: #7fb069; --bad: #e07856;
+  --border: #4a3325; --accent: #c6a15b; --gold: #c6a15b; --accent2: #8b4a2f; --cream: #f5ebdd; --good: #7fb069; --bad: #e07856;
   --radius: 16px;
 }
 [data-theme="light"] {
   color-scheme: light;
   --bg: #f5ebdd; --surface: #fffaf2; --surface2: #e8d8c3; --text: #24150f; --dim: #7a5c46;
-  --border: #dcc9ae; --accent: #8b4a2f; --accent2: #c6a15b; --cream: #f5ebdd;
+  --border: #dcc9ae; --accent: #8b4a2f; --gold: #c6a15b; --accent2: #c6a15b; --cream: #f5ebdd;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }

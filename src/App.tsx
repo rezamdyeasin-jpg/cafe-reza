@@ -880,7 +880,7 @@ export function App() {
             <section style={{ marginTop: 24 }}>
               <h2 className="serif" style={{ fontSize: 24 }}>{tr(lang, "Gallery — real Cafe Reza posters", "গ্যালারি — ক্যাফে রেজার আসল পোস্টার")}</h2>
               <div className="grid products" style={{ marginTop: 10 }}>
-                {["poster-faluda-red.jpg", "poster-grapes2.jpg", "poster-blue.jpg", "poster-dragon.jpg", "tray2.jpg", "tray.jpg", "menu-photo.jpg"].map((f) => (
+                {["poster-faluda-red.jpg", "poster-grapes2.jpg", "poster-blue.jpg", "poster-dragon.jpg", "tray2.jpg", "tray.jpg", "menu-photo.jpg?v=2"].map((f) => (
                   <img key={f} src={`/img/${f}`} alt={f} loading="lazy" style={{ width: "100%", height: 160, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} />
                 ))}
               </div>
@@ -890,7 +890,7 @@ export function App() {
           <section className="card" style={{ padding: 16, marginTop: 24 }}>
             <h2 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Printed menu", "ছাপা মেনু")}</h2>
             <p className="small muted">{tr(lang, "The owner's printed menu photo, for price reference.", "দাম যাচাইয়ের জন্য মালিকের ছাপা মেনুর ছবি।")}</p>
-            <img src="/img/menu-photo.jpg" alt="Cafe Reza printed menu with prices" loading="lazy" style={{ width: "100%", borderRadius: 12, marginTop: 8 }} />
+            <img src="/img/menu-photo.jpg?v=2" alt="Cafe Reza printed menu with prices" loading="lazy" style={{ width: "100%", borderRadius: 12, marginTop: 8 }} />
           </section>
           <AdSlotView slotId="footer" adsJson={settings.adsJson} />
         </main>
