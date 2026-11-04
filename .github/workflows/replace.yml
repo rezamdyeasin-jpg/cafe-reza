@@ -1,0 +1,48 @@
+name: Replace with Firebase code
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  replace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Find zip
+        shell: bash
+        run: |
+          shopt -s nullglob
+          zips=( *.zip )
+          if [ ${#zips[@]} -ne 1 ]; then
+            echo "Expected exactly one .zip in repo root, found: ${zips[*]}"
+            exit 1
+          fi
+          echo "ZIP=${zips[0]}" >> "$GITHUB_ENV"
+      - name: Extract zip
+        shell: bash
+        run: |
+          rm -rf extracted
+          mkdir extracted
+          unzip -o -q "$ZIP" -d extracted
+          if [ ! -d extracted/cafe-reza-firebase ]; then
+            echo "Expected extracted/cafe-reza-firebase, contents:"
+            ls -R extracted | head -n 200
+            exit 1
+          fi
+      - name: Replace repo contents
+        shell: bash
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name 'extracted' ! -name '.github' -exec rm -rf {} +
+          cp -a extracted/cafe-reza-firebase/. .
+          rm -rf extracted "$ZIP"
+          git status --short
+      - name: Commit and push
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Replace with Firebase code" || echo "nothing to commit"
+          git push
