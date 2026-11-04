@@ -9,8 +9,8 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { User } from "firebase/auth";
 import {
-  addDoc, collection, deleteDoc, doc, limit, orderBy, query,
-  serverTimestamp, setDoc, updateDoc,
+  addDoc, collection, deleteDoc, doc, getDocs, limit, orderBy, query,
+  serverTimestamp, setDoc, updateDoc, where,
 } from "firebase/firestore";
 import { getDb, probeFirestore, signOutUser } from "./firebase";
 import { BANNER_SLIDES, CUSTOMER_EMAIL, OWNER_EMAIL, SEED_PRODUCTS } from "./seed";
@@ -61,6 +61,15 @@ const itemName = (products: Product[], it: { productId: string; name: string }, 
   const p = products.find((x) => x.slug === it.productId);
   return p ? displayName(p, lang) : it.name;
 };
+// Dates are shown day-first (DD/MM/YYYY), never the US month-first order.
+const fmtDate = (raw: string) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw ?? "");
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
+};
 
 function OrdersTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Product[]; lang: Lang }) {
   const firestore = getDb();
@@ -68,9 +77,17 @@ function OrdersTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Pr
   const [note, setNote] = useState("");
   const [refundReason, setRefundReason] = useState("");
   const setStatus = async (o: Order, status: string) => {
-    if (!firestore) return;
+    if (!firestore || status === o.status) return;
+    // Cancelling / refunding is destructive and was one accidental tap
+    // away — confirm it first. The select is controlled by the live
+    // order, so cancelling the dialog leaves the old status showing.
+    if (status === "Cancelled" || status === "Refunded") {
+      const ok = window.confirm(tr(lang, `Change ${o.orderNo} to ${status}? This cannot be undone from here.`, `${o.orderNo}-এর অবস্থা ${status === "Cancelled" ? "বাতিল" : "ফেরত"} করবেন? এটা এখান থেকে ফেরানো যাবে না।`));
+      if (!ok) return;
+    }
     await updateDoc(doc(firestore, "orders", o.id), { status });
     audit(userDoc, "order.status", `${o.orderNo} → ${status}`);
+    setNote(tr(lang, `${o.orderNo} status changed to ${status}.`, `${o.orderNo}-এর অবস্থা ${status} করা হয়েছে।`));
   };
   const verifyPayment = async (o: Order) => {
     if (!firestore) return;
@@ -80,6 +97,14 @@ function OrdersTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Pr
   };
   const requestRefund = async (o: Order) => {
     if (!firestore) return;
+    // One order gets one refund request: the button used to create a
+    // new document on every tap, so one order ended up with 4 approved
+    // and 4 rejected rows in the history.
+    const existing = await getDocs(query(collection(firestore, "refundRequests"), where("orderId", "==", o.id), limit(1)));
+    if (!existing.empty) {
+      setNote(tr(lang, `A refund request for ${o.orderNo} already exists — see below.`, `${o.orderNo}-এর ফেরতের অনুরোধ আগেই আছে — নিচে দেখুন।`));
+      return;
+    }
     await addDoc(collection(firestore, "refundRequests"), { orderId: o.id, orderNo: o.orderNo, amount: o.total, reason: refundReason || "Refund requested in admin", requestedBy: userDoc.id, requestedByName: userDoc.name, status: "pending", decidedBy: "", decidedByName: "", createdAt: serverTimestamp() });
     setNote(tr(lang, "Refund request created — an admin/manager decides it below.", "ফেরতের অনুরোধ তৈরি হয়েছে — অ্যাডমিন/ম্যানেজার নিচে সিদ্ধান্ত নেবেন।"));
   };
@@ -113,10 +138,14 @@ function RefundDecisions({ userDoc, lang }: { userDoc: UserDoc; products: Produc
   const { data: reqs } = useLive(() => (firestore ? query(collection(firestore, "refundRequests"), orderBy("createdAt", "desc"), limit(20)) : null),
     (id, d) => ({ id, orderId: String(d.orderId ?? ""), orderNo: String(d.orderNo ?? ""), amount: Number(d.amount ?? 0), reason: String(d.reason ?? ""), status: String(d.status ?? "pending"), requestedByName: String(d.requestedByName ?? "") }));
   if (reqs.length === 0) return null;
+  // Show one row per order (the newest request): older duplicates made
+  // for the same order before the one-request rule collapse here.
+  const seen = new Set<string>();
+  const shown = reqs.filter((r) => { if (seen.has(r.orderId)) return false; seen.add(r.orderId); return true; });
   return (
     <div style={{ marginTop: 18 }}>
       <h4 className="serif" style={{ fontSize: 18 }}>{tr(lang, "Refund requests", "ফেরতের অনুরোধ")}</h4>
-      {reqs.map((r) => (
+      {shown.map((r) => (
         <div key={r.id} className="card" style={{ padding: 10, marginTop: 8 }}>
           <b>{r.orderNo}</b> • {tk(r.amount)} • {r.status} • {r.reason} ({r.requestedByName})
           {r.status === "pending" && canDecide && (
@@ -201,7 +230,7 @@ function PosTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; produ
           <label>{tr(lang, "Cash received", "পাওয়া টাকা")}<input aria-label="Cash received" type="number" value={cashText} onChange={(e) => setCashText(e.target.value)} /></label>
           <p>{tr(lang, "Change:", "ফেরত:")} <b>{tk(change)}</b></p>
           <button className="btn-gold" disabled={busy || lines.length === 0} onClick={() => void sell()}>{tr(lang, "Complete cash sale", "নগদ বিক্রি সম্পন্ন করুন")}</button>
-          <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => setCart([])}>{tr(lang, "Clear all", "সব মুছুন")}</button>
+          <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => { setCart([]); setCashText(""); }}>{tr(lang, "Clear all", "সব মুছুন")}</button>
           {msg && <p className="small" role="status">{msg}</p>}
         </div>
       </div>
@@ -305,9 +334,10 @@ function ReservationsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
   return (
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Tables & Reservations", "টেবিল ও রিজার্ভেশন")}</h3>
+      {res.length === 0 && <p className="muted small">{tr(lang, "No reservations yet.", "এখনো কোনো রিজার্ভেশন নেই।")}</p>}
       {res.map((r) => (
         <div key={r.id} className="card" style={{ padding: 12, marginTop: 10 }}>
-          <b>{r.name}</b> • {r.phone} • {r.date} {r.time} • {r.guests} {tr(lang, "guests", "অতিথি")}
+          <b>{r.name}</b> • {r.phone} • {fmtDate(r.date)} {r.time} • {r.guests} {tr(lang, "guests", "অতিথি")}
           <div className="row" style={{ marginTop: 6 }}>
             <label style={{ margin: 0 }}>{tr(lang, "Status", "অবস্থা")}<select aria-label={`Reservation status ${r.id}`} value={r.status} onChange={(e) => { if (firestore) void updateDoc(doc(firestore, "reservations", r.id), { status: e.target.value }); }}><option>Pending</option><option>Confirmed</option><option>Cancelled</option><option>Completed</option></select></label>
             <label style={{ margin: 0 }}>{tr(lang, "Table", "টেবিল")}<input aria-label="Reservation table" value={r.tableLabel} onChange={(e) => { if (firestore) void updateDoc(doc(firestore, "reservations", r.id), { tableLabel: e.target.value }); }} placeholder="T1" /></label>
@@ -317,6 +347,7 @@ function ReservationsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
         </div>
       ))}
       <h4 className="serif" style={{ fontSize: 18, marginTop: 18 }}>{tr(lang, "Tables", "টেবিল")}</h4>
+      {tables.length === 0 && <p className="muted small">{tr(lang, "No tables yet — add one below.", "এখনো কোনো টেবিল নেই — নিচে টেবিল যোগ করুন।")}</p>}
       {tables.map((t) => <p key={t.id} className="small">{t.label} • {t.capacity} {tr(lang, "seats", "আসন")} • {t.status} <button className="btn-danger" style={{ padding: "2px 8px", marginLeft: 8 }} onClick={() => { if (firestore) void deleteDoc(doc(firestore, "tables", t.id)); }}>{tr(lang, "Delete", "মুছুন")}</button></p>)}
       <div className="row">
         <input aria-label="New table label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="T1" style={{ flex: 1 }} />
@@ -355,6 +386,7 @@ function CouponsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
         <label>{tr(lang, "Description", "বিবরণ")}<input aria-label="Coupon description" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></label>
         <button className="btn-gold" type="submit">{tr(lang, "Save coupon", "কুপন সংরক্ষণ করুন")}</button>
       </form>
+      {coupons.length === 0 && <p className="muted small" style={{ marginTop: 10 }}>{tr(lang, "No coupons yet — make one in the form above.", "এখনো কোনো কুপন নেই — উপরের ফরমে কুপন বানান।")}</p>}
       {coupons.map((c) => <p key={c.id} className="small">{c.code} — {c.kind} {c.value} • {c.active ? tr(lang, "active", "সক্রিয়") : tr(lang, "inactive", "নিষ্ক্রিয়")} • {tr(lang, "used", "ব্যবহৃত")} {c.usedCount} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { if (firestore) void updateDoc(doc(firestore, "coupons", c.id), { active: !c.active }); }}>{c.active ? tr(lang, "Deactivate", "বন্ধ করুন") : tr(lang, "Activate", "চালু করুন")}</button> <button className="btn-danger" style={{ padding: "2px 8px" }} onClick={() => { if (firestore) void deleteDoc(doc(firestore, "coupons", c.id)); }}>{tr(lang, "Delete", "মুছুন")}</button></p>)}
     </div>
   );
@@ -509,6 +541,7 @@ function SupportTab({ userDoc, products, lang }: { userDoc: UserDoc; products: P
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Support & Reviews", "সাপোর্ট ও রিভিউ")}</h3>
       <h4 className="serif" style={{ fontSize: 18, marginTop: 14 }}>{tr(lang, "Messages", "মেসেজ")}</h4>
+      {messages.length === 0 && <p className="muted small">{tr(lang, "No messages yet.", "এখনো কোনো মেসেজ নেই।")}</p>}
       {messages.map((m) => (
         <div key={m.id} className="card" style={{ padding: 10, marginTop: 8 }}>
           <b>{m.authorName || m.author}</b> {m.orderNo && <span className="small muted">({m.orderNo})</span>}
@@ -519,6 +552,7 @@ function SupportTab({ userDoc, products, lang }: { userDoc: UserDoc; products: P
         </div>
       ))}
       <h4 className="serif" style={{ fontSize: 18, marginTop: 18 }}>{tr(lang, "Tickets", "টিকিট")}</h4>
+      {tickets.length === 0 && <p className="muted small">{tr(lang, "No tickets yet.", "এখনো কোনো টিকিট নেই।")}</p>}
       {tickets.map((t) => (
         <div key={t.id} className="card" style={{ padding: 10, marginTop: 8 }}>
           <b>{t.name} • {t.phone}</b> — {t.category} / {t.priority}
@@ -530,6 +564,7 @@ function SupportTab({ userDoc, products, lang }: { userDoc: UserDoc; products: P
         </div>
       ))}
       <h4 className="serif" style={{ fontSize: 18, marginTop: 18 }}>{tr(lang, "Reviews", "রিভিউ")}</h4>
+      {reviews.length === 0 && <p className="muted small">{tr(lang, "No reviews yet.", "এখনো কোনো রিভিউ নেই।")}</p>}
       {reviews.map((r) => {
         const p = products.find((x) => x.slug === r.productId);
         return (
@@ -734,17 +769,21 @@ function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[];
   const revenue = realized(live);
   const completed = live.filter((o) => o.status === "Completed" || o.status === "Delivered");
   const aov = completed.length > 0 ? Math.round(revenue / completed.length) : 0;
-  const discount = live.reduce((a, o) => a + o.discount, 0);
+  // Every money breakdown (best sellers, by category, by payment,
+  // discounts) uses ONLY the completed / delivered orders — the same
+  // set the Revenue headline counts — so the parts always add up to
+  // the headline. Using all live orders here used to sum past it.
+  const discount = completed.reduce((a, o) => a + o.discount, 0);
   const cancelled = list.filter((o) => o.status === "Cancelled").length;
   const best = (() => {
     const m = new Map<string, { name: string; qty: number; rev: number }>();
-    live.forEach((o) => o.items.forEach((it) => { const cur = m.get(it.productId) ?? { name: itemName(products, it, lang), qty: 0, rev: 0 }; cur.qty += it.qty; cur.rev += it.price * it.qty; m.set(it.productId, cur); }));
+    completed.forEach((o) => o.items.forEach((it) => { const cur = m.get(it.productId) ?? { name: itemName(products, it, lang), qty: 0, rev: 0 }; cur.qty += it.qty; cur.rev += it.price * it.qty; m.set(it.productId, cur); }));
     return [...m.values()].sort((a, b) => b.qty - a.qty).slice(0, 8);
   })();
   const byCat = (() => {
     const m = new Map<string, number>();
     const prodBySlug = new Map(products.map((p) => [p.slug, p]));
-    live.forEach((o) => o.items.forEach((it) => { const p = prodBySlug.get(it.productId); const cid = p?.categoryId ?? ""; m.set(cid, (m.get(cid) ?? 0) + it.price * it.qty); }));
+    completed.forEach((o) => o.items.forEach((it) => { const p = prodBySlug.get(it.productId); const cid = p?.categoryId ?? ""; m.set(cid, (m.get(cid) ?? 0) + it.price * it.qty); }));
     return [...m.entries()].map(([cid, rev]) => {
       const cat = categories.find((c) => c.id === cid);
       return { name: cat ? (lang === "bn" ? cat.nameBn : cat.nameEn) : tr(lang, "Other", "অন্যান্য"), rev };
@@ -752,12 +791,14 @@ function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[];
   })();
   const byPayment = (() => {
     const m = new Map<string, { n: number; rev: number }>();
-    live.forEach((o) => { const cur = m.get(o.paymentMethod) ?? { n: 0, rev: 0 }; cur.n += 1; cur.rev += o.total; m.set(o.paymentMethod, cur); });
+    completed.forEach((o) => { const cur = m.get(o.paymentMethod) ?? { n: 0, rev: 0 }; cur.n += 1; cur.rev += o.total; m.set(o.paymentMethod, cur); });
     return [...m.entries()].sort((a, b) => b[1].rev - a[1].rev);
   })();
   const byHour = (() => {
     const blocks = [0, 0, 0, 0, 0, 0];
-    live.forEach((o) => { const h = new Date(o.createdAt).getHours(); if (!Number.isNaN(h)) { const bi = Math.floor(h / 4); blocks[bi] = (blocks[bi] ?? 0) + 1; } });
+    // Counts every order in the period (all statuses), so the blocks
+    // add up to the Orders headline below.
+    list.forEach((o) => { const h = new Date(o.createdAt).getHours(); if (!Number.isNaN(h)) { const bi = Math.floor(h / 4); blocks[bi] = (blocks[bi] ?? 0) + 1; } });
     return blocks;
   })();
   const maxBest = best[0]?.qty ?? 0;
@@ -775,11 +816,11 @@ function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[];
   return (
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Analytics", "অ্যানালাইসিস")}</h3>
-      <p className="small muted">{tr(lang, "Real orders from Firestore only. Revenue counts Completed / Delivered orders; Cancelled / Refunded are excluded.", "শুধু Firestore-এর আসল অর্ডার। আয় শুধু সম্পন্ন / ডেলিভার্ড অর্ডার; বাতিল / ফেরত বাদ।")}</p>
+      <p className="small muted">{tr(lang, "Real orders from Firestore only. Orders counts every order in this period. Revenue and the money breakdowns count only Completed / Delivered orders; Cancelled / Refunded are excluded.", "শুধু Firestore-এর আসল অর্ডার। অর্ডার সংখ্যা এই সময়ের সব অর্ডার। আয় আর টাকার ভাগগুলো শুধু সম্পন্ন / ডেলিভার্ড অর্ডার; বাতিল / ফেরত বাদ।")}</p>
       <PeriodButtons period={period} setPeriod={setPeriod} lang={lang} />
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginTop: 10 }}>
         <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(revenue)}</b><p className="small">{tr(lang, "Revenue", "আয়")}</p></div>
-        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{live.length}</b><p className="small">{tr(lang, "Orders", "অর্ডার")}</p></div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{list.length}</b><p className="small">{tr(lang, "Orders", "অর্ডার")}</p></div>
         <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(aov)}</b><p className="small">{tr(lang, "Average order value", "গড় অর্ডার মূল্য")}</p></div>
         <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(discount)}</b><p className="small">{tr(lang, "Discounts given", "দেওয়া ছাড়")}</p></div>
         <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{cancelled}</b><p className="small">{tr(lang, "Cancelled", "বাতিল")}</p></div>
@@ -974,9 +1015,9 @@ function AppsTab({ lang }: { lang: Lang }) {
   );
 }
 
-export function AdminPanel({ fbUser, userDoc, settings, categories, products, lang, onBack, onSeed, seedBusy, seedMsg, signInCard }: {
-  fbUser: User | null; userDoc: UserDoc | null; settings: Settings; categories: Category[]; products: Product[];
-  lang: Lang; onBack: () => void; onSeed: () => void; seedBusy: boolean; seedMsg: string; signInCard: React.ReactNode;
+export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, products, lang, onToggleLang, theme, onToggleTheme, onBack, onSeed, seedBusy, seedMsg, signInCard }: {
+  fbUser: User | null; authReady: boolean; userDoc: UserDoc | null; settings: Settings; categories: Category[]; products: Product[];
+  lang: Lang; onToggleLang: () => void; theme: "dark" | "light"; onToggleTheme: () => void; onBack: () => void; onSeed: () => void; seedBusy: boolean; seedMsg: string; signInCard: React.ReactNode;
 }) {
   const [tab, setTab] = useState("dashboard");
   const [showAlerts, setShowAlerts] = useState(false);
@@ -994,6 +1035,18 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
   const { data: invItems } = useLive(() => (firestore && staffReady ? query(collection(firestore, "inventory"), orderBy("name"), limit(200)) : null),
     (id, d) => ({ id, name: String(d.name ?? ""), quantity: Number(d.quantity ?? 0), lowAt: Number(d.lowAt ?? 1) }), [staffReady]);
 
+  // While auth is still restoring (page reload), show a loader — never
+  // the sign-in card. Showing the card here is what made a reload flash
+  // the login screen and look like a mid-session logout.
+  if (!authReady) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14, padding: "48px 16px", textAlign: "center" }}>
+        <div className="logo-tile" style={{ width: 64, height: 64 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></div>
+        <div className="spinner" aria-hidden="true" />
+        <p className="muted">{tr(lang, "Checking your sign-in…", "আপনার সাইন-ইন যাচাই হচ্ছে…")}</p>
+      </div>
+    );
+  }
   if (!fbUser) {
     return (
       <div>
@@ -1038,36 +1091,44 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
         <div className="row">
           <button className="chip" onClick={() => { setShowMenu(!showMenu); setShowAlerts(false); }}>☰ {tr(lang, "Menu", "মেনু")}</button>
           <button className="chip" onClick={() => { setShowAlerts(!showAlerts); setShowMenu(false); }}>🔔 {tr(lang, "Alerts", "সতর্কতা")}{alertTotal > 0 ? ` (${alertTotal})` : ""}</button>
+          <button className="chip" aria-label="Switch language" onClick={onToggleLang}>{lang === "bn" ? "EN" : "বাংলা"}</button>
+          <button className="chip" aria-label="Toggle theme" onClick={onToggleTheme}>{theme === "dark" ? "☀" : "☾"}</button>
         </div>
         <p className="serif" style={{ fontSize: 18, margin: 0 }}>{tr(lang, "Admin panel", "অ্যাডমিন প্যানেল")}</p>
         <p className="small muted" style={{ margin: 0 }}>{userDoc.name} • {owner ? tr(lang, "Super Admin (Owner)", "সুপার অ্যাডমিন (মালিক)") : userDoc.role}</p>
         {showAlerts && (
-          <div className="card" style={{ padding: 10, marginTop: 6 }}>
-            {alertTotal === 0 ? <p className="small muted" style={{ margin: 0 }}>{tr(lang, "No alerts — everything is fine.", "কোনো সতর্কতা নেই — সব ঠিক আছে।")}</p> : <>
-              <p className="small" style={{ margin: 0 }}>• {pendingOrders} {tr(lang, "pending orders", "টি অপেক্ষমাণ অর্ডার")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("orders"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
-              <p className="small" style={{ margin: 0 }}>• {pendingVerification} {tr(lang, "payments awaiting verification", "টি পেমেন্ট যাচাইয়ের অপেক্ষায়")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("orders"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
-              <p className="small" style={{ margin: 0 }}>• {lowInvCount} {tr(lang, "low-stock ingredients", "টি কম স্টকের উপকরণ")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("inventory"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
-              <p className="small" style={{ margin: 0 }}>• {lowStock.length} {tr(lang, "low-stock products", "টি কম স্টকের প্রোডাক্ট")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("products"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
-            </>}
+          <div style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, paddingTop: 72 }} onClick={() => setShowAlerts(false)}>
+            <div className="card" role="dialog" aria-label={tr(lang, "Alerts", "সতর্কতা")} style={{ width: "min(480px, 100%)", padding: 16, maxHeight: "80vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+              <div className="row" style={{ justifyContent: "space-between" }}><b className="serif" style={{ fontSize: 18 }}>🔔 {tr(lang, "Alerts", "সতর্কতা")}</b><button className="btn-ghost" aria-label={tr(lang, "Close", "বন্ধ করুন")} onClick={() => setShowAlerts(false)}>✕</button></div>
+              {alertTotal === 0 ? <p className="small muted" style={{ marginTop: 8 }}>{tr(lang, "No alerts — everything is fine.", "কোনো সতর্কতা নেই — সব ঠিক আছে।")}</p> : <>
+                <p className="small" style={{ marginTop: 8 }}>• {pendingOrders} {tr(lang, "pending orders", "টি অপেক্ষমাণ অর্ডার")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("orders"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
+                <p className="small" style={{ margin: 0 }}>• {pendingVerification} {tr(lang, "payments awaiting verification", "টি পেমেন্ট যাচাইয়ের অপেক্ষায়")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("orders"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
+                <p className="small" style={{ margin: 0 }}>• {lowInvCount} {tr(lang, "low-stock ingredients", "টি কম স্টকের উপকরণ")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("inventory"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
+                <p className="small" style={{ margin: 0 }}>• {lowStock.length} {tr(lang, "low-stock products", "টি কম স্টকের প্রোডাক্ট")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("products"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
+              </>}
+            </div>
           </div>
         )}
         {showMenu && (
-          <div className="card" style={{ padding: 10, marginTop: 6 }}>
-            {MENU_GROUPS.map((g) => {
-              const items = visibleTabs.filter((t) => t.group === g.id);
-              if (items.length === 0) return null;
-              return (
-                <div key={g.id} style={{ marginTop: 8 }}>
-                  <p className="small muted" style={{ margin: "0 0 2px", fontWeight: 700 }}>{lang === "bn" ? g.bn : g.en}</p>
-                  {items.map((t) => (
-                    <button key={t.id} className={`chip ${activeTab === t.id ? "chip-on" : ""}`} style={{ display: "block", width: "100%", marginTop: 4, textAlign: "left" }} onClick={() => { setTab(t.id); setShowMenu(false); }}>{t.icon} {lang === "bn" ? t.bn : t.en}</button>
-                  ))}
-                </div>
-              );
-            })}
-            <div style={{ borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 8 }}>
-              <button className="btn-gold" style={{ display: "block", width: "100%" }} onClick={onBack}>🛍️ {tr(lang, "Go to shop", "দোকানে যান")}</button>
-              <button className="btn-ghost" style={{ display: "block", width: "100%", marginTop: 6 }} onClick={() => void signOutUser()}>{tr(lang, "Sign out", "সাইন-আউট")}</button>
+          <div style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, paddingTop: 72 }} onClick={() => setShowMenu(false)}>
+            <div className="card" role="dialog" aria-label={tr(lang, "Menu", "মেনু")} style={{ width: "min(480px, 100%)", padding: 16, maxHeight: "80vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+              <div className="row" style={{ justifyContent: "space-between" }}><b className="serif" style={{ fontSize: 18 }}>☰ {tr(lang, "Menu", "মেনু")}</b><button className="btn-ghost" aria-label={tr(lang, "Close", "বন্ধ করুন")} onClick={() => setShowMenu(false)}>✕</button></div>
+              {MENU_GROUPS.map((g) => {
+                const items = visibleTabs.filter((t) => t.group === g.id);
+                if (items.length === 0) return null;
+                return (
+                  <div key={g.id} style={{ marginTop: 8 }}>
+                    <p className="small muted" style={{ margin: "0 0 2px", fontWeight: 700 }}>{lang === "bn" ? g.bn : g.en}</p>
+                    {items.map((t) => (
+                      <button key={t.id} className={`chip ${activeTab === t.id ? "chip-on" : ""}`} style={{ display: "block", width: "100%", marginTop: 4, textAlign: "left" }} onClick={() => { setTab(t.id); setShowMenu(false); }}>{t.icon} {lang === "bn" ? t.bn : t.en}</button>
+                    ))}
+                  </div>
+                );
+              })}
+              <div style={{ borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 8 }}>
+                <button className="btn-gold" style={{ display: "block", width: "100%" }} onClick={onBack}>🛍️ {tr(lang, "Go to shop", "দোকানে যান")}</button>
+                <button className="btn-ghost" style={{ display: "block", width: "100%", marginTop: 6 }} onClick={() => void signOutUser()}>{tr(lang, "Sign out", "সাইন-আউট")}</button>
+              </div>
             </div>
           </div>
         )}

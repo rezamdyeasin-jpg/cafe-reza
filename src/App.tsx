@@ -451,6 +451,16 @@ const orderItemName = (products: Product[], it: { productId: string; name: strin
   const p = products.find((x) => x.slug === it.productId);
   return p ? displayName(p, lang) : it.name;
 };
+// Dates are shown day-first (DD/MM/YYYY), never the US month-first
+// order: a reservation date "2026-11-05" reads 05/11/2026.
+const fmtDate = (raw: string) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw ?? "");
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
+};
 
 function TrackView({ fbUser, products, lang }: { fbUser: User | null; products: Product[]; lang: Lang }) {
   const firestore = getDb();
@@ -540,7 +550,7 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
       {mineError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your reservations. Please try again.", "আপনার রিজার্ভেশনগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
       {mineLoading && !mineError && <p className="muted small">{tr(lang, "Loading your reservations…", "রিজার্ভেশনগুলো লোড হচ্ছে…")}</p>}
       {!mineLoading && mine.length === 0 && !mineError && <p className="muted small">{tr(lang, "No reservations yet.", "এখনো কোনো রিজার্ভেশন নেই।")}</p>}
-      {mine.map((r) => <div key={r.id} className="card" style={{ marginTop: 8, padding: 12 }}><b>{r.date} {r.time}</b> • {r.guests} {tr(lang, "guests", "অতিথি")} • <span className="chip">{r.status}</span><p className="small muted">{tr(lang, "Table:", "টেবিল:")} {r.tableLabel || tr(lang, "To be assigned", "পরে জানানো হবে")}</p></div>)}
+      {mine.map((r) => <div key={r.id} className="card" style={{ marginTop: 8, padding: 12 }}><b>{fmtDate(r.date)} {r.time}</b> • {r.guests} {tr(lang, "guests", "অতিথি")} • <span className="chip">{r.status}</span><p className="small muted">{tr(lang, "Table:", "টেবিল:")} {r.tableLabel || tr(lang, "To be assigned", "পরে জানানো হবে")}</p></div>)}
     </div>
   );
 }
@@ -574,7 +584,7 @@ function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUs
       {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
       {ordersLoading && !ordersError && <p className="muted small">{tr(lang, "Loading your orders…", "অর্ডারগুলো লোড হচ্ছে…")}</p>}
       {!ordersLoading && orders.length === 0 && !ordersError && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
-      {orders.slice(0, 10).map((o) => <div key={o.id} className="card" style={{ marginTop: 8, padding: 12 }}><div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div><p className="small muted"><span className="chip" style={{ ...statusBadgeStyle(o.status), padding: "2px 8px", fontWeight: 700 }}>{statusLabel(o.status, lang)}</span> {o.paymentMethod} • {paymentStatusLabel(o.paymentStatus, lang)}</p></div>)}
+      {orders.slice(0, 10).map((o) => <div key={o.id} className="card" style={{ marginTop: 8, padding: 12 }}><div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div><p className="small" style={{ marginTop: 4 }}>{o.items.map((it) => `${it.qty} × ${orderItemName(products, it, lang)}`).join(" • ")}</p><p className="small muted" style={{ marginTop: 2 }}>{fmtDate(o.createdAt)}</p><p className="small muted"><span className="chip" style={{ ...statusBadgeStyle(o.status), padding: "2px 8px", fontWeight: 700 }}>{statusLabel(o.status, lang)}</span> {o.paymentMethod} • {paymentStatusLabel(o.paymentStatus, lang)}</p></div>)}
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "Favourites", "প্রিয় আইটেম")}</h3>
       {(!userDoc || userDoc.wishlist.length === 0) && <p className="muted small">{tr(lang, "No favourites yet — tap the heart on a product.", "এখনো প্রিয় আইটেম নেই — প্রোডাক্টের হার্ট চাপুন।")}</p>}
       <div className="row">{(userDoc?.wishlist ?? []).map((slug) => { const p = products.find((x) => x.slug === slug); return p ? <span key={slug} className="chip">{displayName(p, lang)}</span> : null; })}</div>
@@ -607,7 +617,8 @@ function InfoView({ settings, lang }: { settings: Settings; lang: Lang }) {
         <p>{tr(lang, "Phone:", "ফোন:")} <a href={`tel:${settings.phone.replace(/[^+\d]/g, "")}`}>{settings.phone}</a></p>
         <p><a href={settings.facebook} target="_blank" rel="noreferrer">Facebook — Café Reza</a></p>
         <p className="small muted">{tr(lang, "Pin:", "পিন:")} {MAP_COORDS.lat}, {MAP_COORDS.lon} • {MAP_COORDS.plusCode}</p>
-        <iframe title={tr(lang, "Café Reza location map", "ক্যাফে রেজার অবস্থানের মানচিত্র")} src={`https://www.google.com/maps?q=${MAP_COORDS.lat},${MAP_COORDS.lon}&output=embed`} loading="lazy" style={{ width: "100%", height: 280, border: "1px solid var(--border)", borderRadius: 12, marginTop: 8 }} />
+        <iframe title={tr(lang, "Café Reza location map", "ক্যাফে রেজার অবস্থানের মানচিত্র")} src={`https://maps.google.com/maps?q=${MAP_COORDS.lat},${MAP_COORDS.lon}&z=16&output=embed`} loading="lazy" referrerPolicy="no-referrer-when-downgrade" style={{ width: "100%", height: 280, border: "1px solid var(--border)", borderRadius: 12, marginTop: 8, background: "var(--surface)" }} />
+        <p className="small muted" style={{ marginTop: 4 }}>{tr(lang, "If the map does not load here, tap Get Directions below.", "ম্যাপ এখানে না দেখালে নিচে 'দিকনির্দেশনা নিন' চাপুন।")}</p>
         <a className="btn-gold" style={{ display: "inline-block", marginTop: 10, textDecoration: "none" }} href={MAPS_LINK} target="_blank" rel="noopener">{tr(lang, "Get Directions", "দিকনির্দেশনা নিন")}</a>
       </div>
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
@@ -653,6 +664,11 @@ export function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [view, setView] = useState<View>("store");
   const [fbUser, setFbUser] = useState<User | null>(null);
+  // Auth restore is async: until the first onAuthStateChanged fires we
+  // do NOT know whether anyone is signed in, so the admin panel must
+  // show a loader — never the sign-in card — or a reload flashes the
+  // login screen and looks like a mid-session logout.
+  const [authReady, setAuthReady] = useState(false);
   const [loginSuccess, setLoginSuccess] = useState(false);
   const onLoginSuccess = () => {
     setLoginSuccess(true);
@@ -706,7 +722,7 @@ export function App() {
     if (view === "admin" && fbUser && userDoc && !isStaffRole(userDoc.role)) navigate("store");
   }, [view, fbUser, userDoc]);
 
-  useEffect(() => watchAuth((u) => setFbUser(u)), []);
+  useEffect(() => watchAuth((u) => { setFbUser(u); setAuthReady(true); }), []);
   useEffect(() => {
     const firestore = getDb();
     if (!firestore || !fbUser) { setUserDoc(null); return; }
@@ -772,25 +788,28 @@ export function App() {
           Menu / Track / Account buttons navigate away from #/admin, which
           is why tapping Menu threw the owner out of the admin panel. The
           admin panel has its own header, tabs and back button. */}
-      <header className="topbar no-print">
+      {/* The customer header never renders inside the admin panel — the
+          admin has its own header (menu / alerts / title). Rendering it
+          here put the shop logo, tagline and nav on top of the panel. */}
+      {view !== "admin" && (<header className="topbar no-print">
         <div className="wrap row" style={{ justifyContent: "space-between", paddingTop: 10, paddingBottom: 10 }}>
-          <button type="button" onClick={() => { if (view !== "admin") navigate("store"); }} style={{ background: "none", border: "none", display: "flex", gap: 10, alignItems: "center", textAlign: "left", color: "var(--text)", cursor: view === "admin" ? "default" : "pointer" }}>
+          <button type="button" onClick={() => navigate("store")} style={{ background: "none", border: "none", display: "flex", gap: 10, alignItems: "center", textAlign: "left", color: "var(--text)", cursor: "pointer" }}>
             <span className="logo-tile" style={{ width: 44, height: 44 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></span>
             <span><b className="serif" style={{ fontSize: 19 }}>{settings.cafeName}</b><br /><span className={`small muted ${taglineClass(lang)}`}>{taglineText(settings, lang)}</span></span>
           </button>
           <div className="row">
             <button className="chip" aria-label="Switch language" onClick={() => setLang(lang === "bn" ? "en" : "bn")}>{lang === "bn" ? "EN" : "বাংলা"}</button>
             <button className="chip" aria-label="Toggle theme" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? "☀" : "☾"}</button>
-            {view !== "admin" && <button className="chip" aria-label={`Cart, ${cartCount} items`} onClick={() => setCartOpen(true)}>🛒 {cartCount}</button>}
-            {view !== "admin" && <button className="chip" onClick={() => navigate("account")} style={{ maxWidth: 150, minWidth: 118, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "none" }}>{fbUser ? (userDoc?.name ?? tr(lang, "Account", "অ্যাকাউন্ট")) : tr(lang, "Sign in", "সাইন-ইন")}</button>}
+            <button className="chip" aria-label={`Cart, ${cartCount} items`} onClick={() => setCartOpen(true)}>🛒 {cartCount}</button>
+            <button className="chip" onClick={() => navigate("account")} style={{ maxWidth: 150, minWidth: 118, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "none" }}>{fbUser ? (userDoc?.name ?? tr(lang, "Account", "অ্যাকাউন্ট")) : tr(lang, "Sign in", "সাইন-ইন")}</button>
           </div>
         </div>
-        {view !== "admin" && (<nav className="wrap row" style={{ paddingBottom: 8 }} aria-label="Main">
+        <nav className="wrap row" style={{ paddingBottom: 8 }} aria-label="Main">
           {([["store", tr(lang, "Menu", "মেনু")], ["track", tr(lang, "Track", "ট্র্যাক")], ["reserve", tr(lang, "Reserve", "রিজার্ভ")], ["info", tr(lang, "About", "সম্পর্কে")], ["account", tr(lang, "Account", "অ্যাকাউন্ট")]] as Array<[View, string]>).map(([v, label]) => (
             <button key={v} className={`chip ${view === v ? "chip-on" : ""}`} onClick={() => navigate(v)}>{label}</button>
           ))}
-        </nav>)}
-      </header>
+        </nav>
+      </header>)}
 
       {showSetupNotice && (
         <div className="wrap"><div className="card" style={{ padding: 14, marginTop: 12, border: "2px solid var(--bad)" }}>
@@ -804,7 +823,7 @@ export function App() {
       {view === "admin" ? (
         <main className="wrap" style={{ marginTop: 14 }}>
           <PanelErrorBoundary lang={lang} onBack={() => navigate("store")}>
-            <AdminPanel fbUser={fbUser} userDoc={userDoc} settings={settings} categories={categories} products={products} lang={lang} onBack={() => navigate("store")} onSeed={runSeed} seedBusy={seedBusy} seedMsg={seedMsg} signInCard={<SignInCard lang={lang} onSignedIn={onLoginSuccess} />} />
+            <AdminPanel fbUser={fbUser} authReady={authReady} userDoc={userDoc} settings={settings} categories={categories} products={products} lang={lang} onToggleLang={() => setLang(lang === "bn" ? "en" : "bn")} theme={theme} onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")} onBack={() => navigate("store")} onSeed={runSeed} seedBusy={seedBusy} seedMsg={seedMsg} signInCard={<SignInCard lang={lang} onSignedIn={onLoginSuccess} />} />
           </PanelErrorBoundary>
         </main>
       ) : view === "track" ? (
@@ -895,7 +914,7 @@ export function App() {
             <section style={{ marginTop: 24 }}>
               <h2 className="serif" style={{ fontSize: 24 }}>{tr(lang, "Gallery — real Cafe Reza posters", "গ্যালারি — ক্যাফে রেজার আসল পোস্টার")}</h2>
               <div className="grid products" style={{ marginTop: 10 }}>
-                {["poster-faluda-red.jpg", "poster-grapes2.jpg", "poster-blue.jpg", "poster-dragon.jpg", "tray2.jpg", "tray.jpg", "menu-photo.jpg?v=2"].map((f) => (
+                {["poster-faluda-red.jpg", "poster-grapes2.jpg", "poster-blue.jpg", "poster-dragon.jpg", "tray2.jpg", "tray.jpg"].map((f) => (
                   <img key={f} src={`/img/${f}`} alt={f} loading="lazy" style={{ width: "100%", height: 160, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} />
                 ))}
               </div>
@@ -940,9 +959,8 @@ export function App() {
         <button onClick={() => navigate("track")}>📦 {tr(lang, "Track", "ট্র্যাক")}</button>
         <button onClick={() => navigate("account")}>👤 {tr(lang, "Account", "অ্যাকাউন্ট")}</button>
       </nav>)}
-      {isStaff && view !== "admin" && (
-        <button className="btn-gold no-print" style={{ position: "fixed", left: 16, bottom: 76, zIndex: 40, boxShadow: "0 8px 20px rgba(0,0,0,.35)", padding: "10px 14px" }} onClick={() => navigate("admin")}>← {tr(lang, "Admin panel", "অ্যাডমিন প্যানেল")}</button>
-      )}
+      {/* No floating admin button on customer pages: the customer app
+          carries no admin trace. Staff reach the panel via #/admin. */}
       {cart.length > 0 && view === "store" && !cartOpen && (
         <button className="btn-gold no-print" style={{ position: "fixed", right: 16, bottom: 76, zIndex: 40, boxShadow: "0 8px 20px rgba(0,0,0,.35)" }} onClick={() => setCartOpen(true)}>{tr(lang, "View cart", "কার্ট দেখুন")} • {tk(cart.reduce((a, c) => { const p = products.find((x) => x.slug === c.productId); return a + (p ? effPrice(p) * c.qty : 0); }, 0))} ({cartCount})</button>
       )}

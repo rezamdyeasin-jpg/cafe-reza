@@ -193,6 +193,14 @@ export async function seedCatalog(): Promise<{ inserted: number; categories: num
     });
     const settingsSnap = await getDocs(query(collection(firestore, "settings"), where("__name__", "==", "cafe"), limit(1)));
     if (settingsSnap.empty) batch.set(doc(firestore, "settings", "cafe"), { ...DEFAULT_SETTINGS, updatedAt: serverTimestamp() });
+    // Default tables so the Tables & Reservations tab is never an empty
+    // list on a fresh setup; the owner can rename, add or delete them.
+    const existingTables = await getDocs(collection(firestore, "tables"));
+    if (existingTables.empty) {
+      ["T1", "T2", "T3", "T4", "T5", "T6"].forEach((label, i) => {
+        batch.set(doc(firestore, "tables", label), { label, capacity: i < 2 ? 2 : 4, status: "Available", notes: "" });
+      });
+    }
     batch.set(doc(firestore, "meta", "lastSync"), { at: serverTimestamp(), products: SEED_PRODUCTS.length, source: "cafe-reza-firebase-seed" });
     await batch.commit();
     return { inserted, categories: catCount };
