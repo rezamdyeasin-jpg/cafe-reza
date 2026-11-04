@@ -17,7 +17,7 @@ import { BANNER_SLIDES, CUSTOMER_EMAIL, OWNER_EMAIL, SEED_PRODUCTS } from "./see
 import {
   AD_SLOT_DEFS, expenseFromDoc, isStaffRole, orderFromDoc, ORDER_STATUSES, parseAds, parseBannerSelection, parseContent,
   tr, tsToIso, useLive, userFromDoc,
-  type Category, type Coupon, type Expense, type Lang, type Order, type Product, type Reservation, type Settings, type UserDoc,
+  type AuditLogEntry, type Category, type Coupon, type Expense, type Lang, type Order, type Product, type Reservation, type Settings, type UserDoc,
 } from "./db";
 import { cancelOrderTx, comboDiscount, COMBO_DISCOUNT_PER_LINE, COMBO_MIN_QTY, HAPPY_HOUR_END, HAPPY_HOUR_PERCENT, HAPPY_HOUR_START, happyHourDiscount, placeOrderTx, timeToMin } from "./orders";
 import { InstallAppCard } from "./InstallAppCard";
@@ -88,8 +88,35 @@ const fmtDate = (raw: string) => {
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
 };
 
+// A clock that ticks every `intervalMs` so time-sensitive UI (the
+// kitchen waiting timer) updates without a reload.
+function useNow(intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+// Waiting time since an order was placed, as mm:ss (or hh:mm:ss
+// past an hour). Only live kitchen stages count — a finished,
+// delivered or cancelled order has no waiting time.
+const KITCHEN_ACTIVE = ["Pending", "Confirmed", "Preparing", "Ready", "Out for Delivery"];
+function waitingText(createdAt: string, now: number): string {
+  const created = Date.parse(createdAt);
+  if (!created) return "";
+  const secs = Math.max(0, Math.floor((now - created) / 1000));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${p(h)}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
+}
+
 function OrdersTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; products: Product[]; settings: Settings; lang: Lang }) {
   const firestore = getDb();
+  const now = useNow(1000);
   const { data: orders } = useLive<Order>(() => (firestore ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(60)) : null), orderFromDoc);
   // Trust stats come from a wider recent window (200 orders) than the
   // 60 shown here, so a number's history is judged on more than the
@@ -197,10 +224,23 @@ function OrdersTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; pr
       {orders.map((o) => {
         const st = phoneStats.get(normalizePhone(o.phone ?? ""));
         const lvl = st ? trustLevel(st.cancelRate, settings.riskCautionPct ?? 25, settings.riskRiskyPct ?? 50) : null;
+        // Kitchen timer: how long this order has waited since it was
+        // placed. Past the admin's late limit it turns red and the
+        // card gets a red border, so a late order is visible at a
+        // glance. Only orders still in the kitchen count.
+        const isKitchenActive = KITCHEN_ACTIVE.includes(o.status);
+        const waitMs = isKitchenActive ? now - Date.parse(o.createdAt) : 0;
+        const isLate = isKitchenActive && waitMs > (settings.kitchenLateMinutes ?? 30) * 60000;
         return (
-        <div key={o.id} className="card" style={{ padding: 12, marginTop: 10, border: lvl === "risky" ? "2px solid var(--bad)" : undefined }}>
+        <div key={o.id} className="card" style={{ padding: 12, marginTop: 10, border: lvl === "risky" ? "2px solid var(--bad)" : isLate ? "2px solid var(--bad)" : undefined, background: isLate ? "rgba(224,120,86,.08)" : undefined }}>
           <div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)} • {o.paymentStatus}</span></div>
           <p className="small muted">{o.customerName} • {o.phone} • {o.orderType} • {o.source} • {o.createdAt ? new Date(o.createdAt).toLocaleString("en-GB") : ""}</p>
+          {isKitchenActive && (
+            <p style={{ margin: "4px 0 0", fontWeight: 700, color: isLate ? "var(--bad)" : undefined }}>
+              ⏱️ {tr(lang, "Waiting", "অপেক্ষা করছে")} {waitingText(o.createdAt, now)}
+              {isLate && <span style={{ marginLeft: 8 }}>🔴 {tr(lang, "LATE — over the kitchen limit", "দেরি — কিচেনের সীমা পেরিয়েছে")}</span>}
+            </p>
+          )}
           {st && <p style={{ margin: "4px 0 0" }}><PhoneTrustBadge stats={st} settings={settings} lang={lang} /></p>}
           {lvl === "risky" && <p className="small" style={{ color: "var(--bad)", fontWeight: 700, margin: "4px 0 0" }}>⚠ {tr(lang, "Warning: this number cancels often — confirm the order by phone before preparing it.", "সতর্কতা: এই নম্বর থেকে প্রায়ই বাতিল হয় — তৈরি করার আগে ফোনে অর্ডারটি নিশ্চিত করুন।")}</p>}
           <ul className="small">{o.items.map((it, i) => <li key={i}>{it.qty} × {itemName(products, it, lang)} — {tk(it.price)}</li>)}</ul>
@@ -297,7 +337,7 @@ function PosTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; produ
             const inCart = qtyBySlug.get(p.slug) ?? 0;
             return (
               <button key={p.slug} type="button" className="card" style={{ padding: 10, textAlign: "left", color: "var(--text)", position: "relative", boxShadow: inCart > 0 ? "0 0 0 2px var(--gold)" : undefined }} onClick={() => inc(p.slug)}>
-                {p.imageKey && <img src={`/img/${p.imageKey}`} alt="" loading="lazy" style={{ width: "100%", height: 64, objectFit: "cover", borderRadius: 8, marginBottom: 6 }} />}
+                {p.imageKey && <img src={`/img/${p.imageKey}`} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: 64, objectFit: "cover", borderRadius: 8, marginBottom: 6 }} />}
                 <b>{displayName(p, lang)}</b><br /><span>{tk(p.discountPrice ?? p.price)}</span>
                 {inCart > 0 && <span style={{ position: "absolute", top: 6, right: 6, background: "var(--gold)", color: "#1a1207", borderRadius: 999, minWidth: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, padding: "0 6px" }}>×{inCart}</span>}
               </button>
@@ -342,28 +382,28 @@ function PosTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; produ
 function ProductsTab({ userDoc, categories, products, lang }: { userDoc: UserDoc; categories: Category[]; products: Product[]; lang: Lang }) {
   const firestore = getDb();
   const [editing, setEditing] = useState<Product | null>(null);
-  const [form, setForm] = useState({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", sortOrder: 1 });
+  const [form, setForm] = useState({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", spiceLevel: "", veg: "", sortOrder: 1 });
   const [catForm, setCatForm] = useState({ id: "", nameEn: "", nameBn: "", sortOrder: 99, active: true });
   const [msg, setMsg] = useState("");
   const startEdit = (p: Product) => {
     // Toggle: tapping Edit on the row that is already open closes it.
     // Opening another row closes the first one — only one inline
     // editor is ever open, and it always sits directly under its row.
-    if (editing?.slug === p.slug) { setEditing(null); setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", sortOrder: 1 }); return; }
+    if (editing?.slug === p.slug) { setEditing(null); setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", spiceLevel: "", veg: "", sortOrder: 1 }); return; }
     setEditing(p);
-    setForm({ slug: p.slug, nameEn: p.nameEn, nameBn: p.nameBn, description: p.description, categoryId: p.categoryId, price: p.price, discountPrice: p.discountPrice == null ? "" : String(p.discountPrice), stock: p.stock, available: p.available, featured: p.featured, bestSeller: p.bestSeller, isNew: p.isNew, imageKey: p.imageKey ?? "", imageKey2: p.imageKey2 ?? "", ingredients: p.ingredients, sortOrder: p.sortOrder });
+    setForm({ slug: p.slug, nameEn: p.nameEn, nameBn: p.nameBn, description: p.description, categoryId: p.categoryId, price: p.price, discountPrice: p.discountPrice == null ? "" : String(p.discountPrice), stock: p.stock, available: p.available, featured: p.featured, bestSeller: p.bestSeller, isNew: p.isNew, imageKey: p.imageKey ?? "", imageKey2: p.imageKey2 ?? "", ingredients: p.ingredients, spiceLevel: p.spiceLevel, veg: p.veg, sortOrder: p.sortOrder });
   };
   const save = async (e: FormEvent) => {
     e.preventDefault();
     if (!firestore) return;
     const slug = form.slug.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-") || `item-${Date.now()}`;
-    const data = { slug, nameEn: form.nameEn.trim(), nameBn: form.nameBn.trim(), description: form.description.trim(), categoryId: form.categoryId, price: Number(form.price), discountPrice: form.discountPrice === "" ? null : Number(form.discountPrice), stock: Number(form.stock), available: form.available, featured: form.featured, bestSeller: form.bestSeller, isNew: form.isNew, imageKey: form.imageKey || null, imageKey2: form.imageKey2 || null, ingredients: form.ingredients.trim(), sortOrder: Number(form.sortOrder), updatedAt: serverTimestamp() };
+    const data = { slug, nameEn: form.nameEn.trim(), nameBn: form.nameBn.trim(), description: form.description.trim(), categoryId: form.categoryId, price: Number(form.price), discountPrice: form.discountPrice === "" ? null : Number(form.discountPrice), stock: Number(form.stock), available: form.available, featured: form.featured, bestSeller: form.bestSeller, isNew: form.isNew, imageKey: form.imageKey || null, imageKey2: form.imageKey2 || null, ingredients: form.ingredients.trim(), spiceLevel: form.spiceLevel, veg: form.veg, sortOrder: Number(form.sortOrder), updatedAt: serverTimestamp() };
     if (editing) await updateDoc(doc(firestore, "products", editing.slug), data);
     else await setDoc(doc(firestore, "products", slug), { ...data, costPrice: 0, prepTime: 10 });
     audit(userDoc, editing ? "product.update" : "product.create", `${data.nameEn} — price ${data.price}`);
     setMsg(tr(lang, "Product saved — the customer menu updates at once.", "প্রোডাক্ট সংরক্ষিত হয়েছে — কাস্টমার মেনু সাথে সাথে বদলে যাবে।"));
     setEditing(null);
-    setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", sortOrder: 1 });
+    setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", spiceLevel: "", veg: "", sortOrder: 1 });
   };
   const remove = async (p: Product) => {
     if (!firestore) return;
@@ -399,11 +439,24 @@ function ProductsTab({ userDoc, categories, products, lang }: { userDoc: UserDoc
       <label>{tr(lang, "Second photo file", "দ্বিতীয় ছবির ফাইল")}<select aria-label="Second photo file" value={form.imageKey2} onChange={(e) => setForm({ ...form, imageKey2: e.target.value })}><option value="">{tr(lang, "Same as photo", "ছবির মতোই")}</option>{IMG_FILES.map((f) => <option key={f} value={f}>{f}</option>)}</select></label>
       <label>{tr(lang, "Ingredients (comma separated)", "উপকরণ (কমা দিয়ে)")}<input aria-label="Ingredients" value={form.ingredients} onChange={(e) => setForm({ ...form, ingredients: e.target.value })} /></label>
       <div className="row">
+        <label style={{ flex: 1 }}>{tr(lang, "Spice level", "ঝালের মাত্রা")}<select aria-label="Spice level" value={form.spiceLevel} onChange={(e) => setForm({ ...form, spiceLevel: e.target.value })}>
+          <option value="">{tr(lang, "Not set", "বসানো হয়নি")}</option>
+          <option value="mild">{tr(lang, "Mild", "হালকা")}</option>
+          <option value="medium">{tr(lang, "Medium", "মাঝারি")}</option>
+          <option value="hot">{tr(lang, "Hot", "ঝাল")}</option>
+        </select></label>
+        <label style={{ flex: 1 }}>{tr(lang, "Veg / Non-veg", "ভেজ / নন-ভেজ")}<select aria-label="Veg or non-veg" value={form.veg} onChange={(e) => setForm({ ...form, veg: e.target.value })}>
+          <option value="">{tr(lang, "Not set", "বসানো হয়নি")}</option>
+          <option value="veg">{tr(lang, "Veg", "ভেজ")}</option>
+          <option value="non-veg">{tr(lang, "Non-veg", "নন-ভেজ")}</option>
+        </select></label>
+      </div>
+      <div className="row">
         {(["available", "featured", "bestSeller", "isNew"] as const).map((k) => <label key={k} style={{ display: "flex", gap: 6, alignItems: "center", margin: 0 }}><input type="checkbox" checked={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.checked })} style={{ width: "auto" }} />{k}</label>)}
       </div>
       <div className="row" style={{ marginTop: 10 }}>
         <button className="btn-gold" type="submit">{tr(lang, "Save product", "প্রোডাক্ট সংরক্ষণ করুন")}</button>
-        {editing && <button className="btn-ghost" type="button" onClick={() => { setEditing(null); setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", sortOrder: 1 }); }}>{tr(lang, "Cancel edit", "সম্পাদনা বাতিল")}</button>}
+        {editing && <button className="btn-ghost" type="button" onClick={() => { setEditing(null); setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", spiceLevel: "", veg: "", sortOrder: 1 }); }}>{tr(lang, "Cancel edit", "সম্পাদনা বাতিল")}</button>}
       </div>
     </form>
   );
@@ -452,7 +505,7 @@ function ProductsTab({ userDoc, categories, products, lang }: { userDoc: UserDoc
 function ReservationsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
   const firestore = getDb();
   const { data: res } = useLive<Reservation>(() => (firestore ? query(collection(firestore, "reservations"), orderBy("createdAt", "desc"), limit(60)) : null),
-    (id, d) => ({ id, name: String(d.name ?? ""), phone: String(d.phone ?? ""), email: String(d.email ?? ""), date: String(d.date ?? ""), time: String(d.time ?? ""), guests: Number(d.guests ?? 2), requests: String(d.requests ?? ""), status: String(d.status ?? "Pending"), tableLabel: String(d.tableLabel ?? ""), userId: String(d.userId ?? ""), createdAt: "" }));
+    (id, d) => ({ id, name: String(d.name ?? ""), phone: String(d.phone ?? ""), email: String(d.email ?? ""), date: String(d.date ?? ""), time: String(d.time ?? ""), guests: Number(d.guests ?? 2), requests: String(d.requests ?? ""), status: String(d.status ?? "Pending"), tableLabel: String(d.tableLabel ?? ""), userId: String(d.userId ?? ""), createdAt: "", reminderAt: tsToIso(d.reminderAt) }));
   const { data: tables } = useLive(() => (firestore ? query(collection(firestore, "tables"), orderBy("label")) : null),
     (id, d) => ({ id, label: String(d.label ?? id), capacity: Number(d.capacity ?? 4), status: String(d.status ?? "Available"), notes: String(d.notes ?? "") }));
   const [label, setLabel] = useState("");
@@ -467,9 +520,17 @@ function ReservationsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
           <div className="row" style={{ marginTop: 6 }}>
             <label style={{ margin: 0 }}>{tr(lang, "Status", "অবস্থা")}<select aria-label={`Reservation status ${r.id}`} value={r.status} onChange={(e) => { if (firestore) void updateDoc(doc(firestore, "reservations", r.id), { status: e.target.value }); }}><option>Pending</option><option>Confirmed</option><option>Cancelled</option><option>Completed</option></select></label>
             <label style={{ margin: 0 }}>{tr(lang, "Table", "টেবিল")}<input aria-label="Reservation table" value={r.tableLabel} onChange={(e) => { if (firestore) void updateDoc(doc(firestore, "reservations", r.id), { tableLabel: e.target.value }); }} placeholder="T1" /></label>
+            {(r.status === "Pending" || r.status === "Confirmed") && (
+              <button className="btn-gold" style={{ padding: "6px 10px" }} onClick={() => {
+                if (!firestore) return;
+                void updateDoc(doc(firestore, "reservations", r.id), { reminderAt: new Date().toISOString() });
+                audit(userDoc, "reservation.reminder", `${r.name} — ${r.date} ${r.time}`);
+              }}>🔔 {tr(lang, "Send reminder", "মনে করিয়ে দিন")}</button>
+            )}
             <button className="btn-danger" style={{ padding: "6px 10px" }} onClick={() => { if (firestore) void deleteDoc(doc(firestore, "reservations", r.id)); }}>{tr(lang, "Delete", "মুছুন")}</button>
           </div>
           {r.requests && <p className="small muted">{r.requests}</p>}
+          {r.reminderAt && <p className="small muted" style={{ margin: "4px 0 0" }}>🔔 {tr(lang, "Reminder sent:", "মনে করানো হয়েছে:")} {new Date(r.reminderAt).toLocaleString("en-GB")}</p>}
         </div>
       ))}
       <h4 className="serif" style={{ fontSize: 18, marginTop: 18 }}>{tr(lang, "Tables", "টেবিল")}</h4>
@@ -629,6 +690,13 @@ function SettingsTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: 
           <label style={{ flex: 1 }}>{tr(lang, "Trust: Risky at cancel rate (%)", "ট্রাস্ট: ঝুঁকিপূর্ণ সীমা — বাতিলের হার (%)")}<input aria-label="Trust risky percent" type="number" min={0} max={100} value={f.riskRiskyPct} onChange={num("riskRiskyPct")} /></label>
         </div>
         <p className="small muted">{tr(lang, "After this many minutes the customer can no longer cancel — only the admin can. The customer can still message the admin in the chatbox. A phone number whose cancel rate reaches the Risky limit shows a red warning on its orders; at the Caution limit it shows yellow.", "এত মিনিট পর কাস্টমার আর বাতিল করতে পারবে না — তখন শুধু অ্যাডমিন বাতিল করতে পারবেন। কাস্টমার চ্যাটবক্সে অ্যাডমিনকে জানাতে পারবেন। কোনো নম্বরের বাতিলের হার ঝুঁকিপূর্ণ সীমায় পৌঁছালে তার অর্ডারে লাল সতর্কতা দেখাবে; সতর্ক সীমায় হলুদ।")}</p>
+        <b style={{ marginTop: 14 }}>{tr(lang, "Live tracking & kitchen timers (minutes)", "লাইভ ট্র্যাকিং ও কিচেন টাইমার (মিনিট)")}</b>
+        <div className="row" style={{ marginTop: 8 }}>
+          <label style={{ flex: 1 }}>{tr(lang, "Prep time (minutes)", "তৈরির সময় (মিনিট)")}<input aria-label="Prep time minutes" type="number" min={0} value={f.prepMinutes} onChange={num("prepMinutes")} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Delivery time (minutes)", "ডেলিভারির সময় (মিনিট)")}<input aria-label="Delivery time minutes" type="number" min={0} value={f.deliveryMinutes} onChange={num("deliveryMinutes")} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Kitchen late after (minutes)", "কিচেনে দেরি ধরা হবে (মিনিট)")}<input aria-label="Kitchen late after minutes" type="number" min={0} value={f.kitchenLateMinutes} onChange={num("kitchenLateMinutes")} /></label>
+        </div>
+        <p className="small muted">{tr(lang, "The Track page estimates arrival from the order time plus prep and delivery minutes. In Live Orders, an order waiting longer than the late limit turns red.", "ট্র্যাক পেজে অর্ডারের সময়ের সাথে তৈরির ও ডেলিভারির সময় যোগ করে পৌঁছানোর আনুমানিক সময় দেখায়। লাইভ অর্ডারে দেরির সীমা পেরোনো অর্ডার লাল হয়ে যায়।")}</p>
         <b style={{ marginTop: 14 }}>{tr(lang, "AI assistant (inside the customer chatbox)", "AI সহকারী (কাস্টমার চ্যাটবক্সের ভেতরে)")}</b>
         <label style={{ marginTop: 8 }}>{tr(lang, "Gemini API key", "Gemini API কী")}<input aria-label="Gemini API key" type="password" value={f.geminiApiKey} onChange={str("geminiApiKey")} placeholder="AIza…" autoComplete="off" /></label>
         <p className="small muted">{tr(lang, "The chatbox AI answers customers from the live menu and offers using this key. Restrict the key in Google Cloud Console → Credentials → API restrictions + HTTP referrers to cafe-reza.web.app ONLY before pasting it here — otherwise anyone who reads it could use it. Leave it empty and the chat still works; customers just talk to the admin directly.", "চ্যাটবক্সের AI এই কী দিয়ে লাইভ মেনু ও অফার থেকে কাস্টমারের উত্তর দেয়। এখানে বসানোর আগে Google Cloud Console → Credentials-এ কী-টিকে API restrictions ও HTTP referrers দিয়ে শুধু cafe-reza.web.app-এর জন্য সীমাবদ্ধ করুন — নইলে যে কেউ পড়ে ব্যবহার করতে পারবে। খালি রাখলে চ্যাট তবু চলবে; কাস্টমার সরাসরি অ্যাডমিনের সাথে কথা বলবেন।")}</p>
@@ -646,6 +714,31 @@ function UsersTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: Set
   const { data: statsOrders } = useLive<Order>(() => (firestore ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(200)) : null), orderFromDoc);
   const phoneStats = useMemo(() => computePhoneStats(statsOrders), [statsOrders]);
   const [msg, setMsg] = useState("");
+  const [search, setSearch] = useState("");
+  // Per-customer totals from the recent-orders window (the same 200
+  // orders Live Orders reads). The order count comes from the user
+  // doc itself, so it is the true lifetime total. Orders match by
+  // user id, or by the customer's phone for counter orders placed
+  // without sign-in. Cancelled/refunded orders spend nothing.
+  const crm = useMemo(() => {
+    const m = new Map<string, { spent: number; lastAt: string }>();
+    for (const o of statsOrders) {
+      if (o.status === "Cancelled" || o.status === "Refunded") continue;
+      const key = o.userId || (o.phone ? `phone:${normalizePhone(o.phone)}` : "");
+      if (!key) continue;
+      const cur = m.get(key) ?? { spent: 0, lastAt: "" };
+      cur.spent += o.total;
+      if (!cur.lastAt || o.createdAt > cur.lastAt) cur.lastAt = o.createdAt;
+      m.set(key, cur);
+    }
+    return m;
+  }, [statsOrders]);
+  const crmFor = (u: UserDoc) => crm.get(u.id) ?? crm.get(`phone:${normalizePhone(u.phone ?? "")}`) ?? { spent: 0, lastAt: "" };
+  const shown = users.filter((u) => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return true;
+    return `${u.name} ${u.email} ${u.phone}`.toLowerCase().includes(needle);
+  });
   const changeRole = async (u: UserDoc, role: string) => {
     if (!firestore) return;
     if (u.email === OWNER_EMAIL && role !== "admin") { setMsg(tr(lang, "The owner account must stay admin.", "মালিকের অ্যাকাউন্ট অ্যাডমিনই থাকতে হবে।")); return; }
@@ -659,14 +752,49 @@ function UsersTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: Set
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Users & Staff", "ইউজার ও স্টাফ")}</h3>
       <p className="small muted">{tr(lang, "Staff sign in with Google, Facebook or phone, then an admin gives them a staff role here. Roles can never move the owner off admin or the pinned customer onto staff. New staff accounts are created by signing in first — there is no password to invent.", "স্টাফ Google, Facebook বা ফোনে সাইন-ইন করেন, তারপর অ্যাডমিন এখানে স্টাফ রোল দেন। রোল কখনো মালিককে অ্যাডমিন থেকে সরায় না বা নির্দিষ্ট কাস্টমারকে স্টাফ বানায় না। নতুন স্টাফ অ্যাকাউন্ট আগে সাইন-ইন করে তৈরি হয় — কোনো পাসওয়ার্ড বানানো হয় না।")}</p>
       {msg && <p className="small" role="status">{msg}</p>}
-      {users.map((u) => (
+      <input aria-label="Search customers" value={search} onChange={(e) => setSearch(e.target.value)} placeholder={tr(lang, "Search by name, phone or email…", "নাম, ফোন বা ইমেইল দিয়ে খুঁজুন…")} style={{ marginTop: 10 }} />
+      {shown.length === 0 && <p className="muted small">{tr(lang, "No customers match that search.", "এই খোঁজে কোনো কাস্টমার মেলেনি।")}</p>}
+      {shown.map((u) => {
+        const c = crmFor(u);
+        return (
         <div key={u.id} className="card" style={{ padding: 10, marginTop: 8 }}>
-          <b>{u.name}</b> — {u.email} • {u.phone} • {u.loyaltyPoints} {tr(lang, "pts", "পয়েন্ট")} • {u.status}
+          <b>{u.name}</b> — {u.email} • {u.phone} • {u.status}
           {u.role === "customer" && <span style={{ marginLeft: 8 }}><PhoneTrustBadge stats={phoneStats.get(normalizePhone(u.phone ?? ""))} settings={settings} lang={lang} /></span>}
+          <p className="small muted" style={{ margin: "4px 0 0" }}>
+            {tr(lang, "Orders:", "অর্ডার:")} {u.orderCount} • {tr(lang, "Spent:", "খরচ:")} {tk(c.spent)} • {tr(lang, "Last order:", "শেষ অর্ডার:")} {c.lastAt ? fmtDate(c.lastAt) : "—"} • ⭐ {u.loyaltyPoints} {tr(lang, "pts", "পয়েন্ট")} ({u.tier})
+          </p>
           <div className="row" style={{ marginTop: 6 }}>
             <label style={{ margin: 0 }}>{tr(lang, "Role", "রোল")}<select aria-label={`Role for ${u.email}`} value={u.role} onChange={(e) => void changeRole(u, e.target.value)}><option value="customer">customer</option>{STAFF_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}</select></label>
             <button className="btn-ghost" style={{ padding: "6px 10px" }} onClick={() => { if (firestore) void updateDoc(doc(firestore, "users", u.id), { status: u.status === "active" ? "suspended" : "active" }); }}>{u.status === "active" ? tr(lang, "Suspend", "সাসপেন্ড") : tr(lang, "Activate", "সক্রিয় করুন")}</button>
           </div>
+        </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Audit log (owner only): every recorded admin/staff action, newest
+// first, straight from the `auditLogs` collection the audit()
+// helper writes to. Reads are staff-only in the rules; the tab
+// itself is owner-only in ADMIN_TABS.
+function AuditLogTab({ lang }: { lang: Lang }) {
+  const firestore = getDb();
+  const { data: logs, loading } = useLive<AuditLogEntry>(() => (firestore ? query(collection(firestore, "auditLogs"), orderBy("createdAt", "desc"), limit(100)) : null),
+    (id, d) => ({ id, actorName: String(d.actorName ?? ""), action: String(d.action ?? ""), detail: String(d.detail ?? ""), createdAt: tsToIso(d.createdAt) }));
+  return (
+    <div>
+      <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Audit Log", "অডিট লগ")}</h3>
+      <p className="small muted">{tr(lang, "Who did what, and when — the newest first. Only the owner sees this.", "কে কী করল, কখন — নতুনটা আগে। শুধু মালিকই এটা দেখতে পান।")}</p>
+      {loading && <p className="muted small">{tr(lang, "Loading…", "লোড হচ্ছে…")}</p>}
+      {!loading && logs.length === 0 && <p className="muted small">{tr(lang, "No audit records yet.", "এখনো কোনো অডিট রেকর্ড নেই।")}</p>}
+      {logs.map((l) => (
+        <div key={l.id} className="card" style={{ padding: "8px 12px", marginTop: 6 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <b>{l.action}</b>
+            <span className="small muted">{l.createdAt ? new Date(l.createdAt).toLocaleString("en-GB") : ""}</span>
+          </div>
+          <p className="small muted" style={{ margin: "4px 0 0" }}>{l.actorName} — {l.detail}</p>
         </div>
       ))}
     </div>
@@ -907,6 +1035,7 @@ const ADMIN_TABS: AdminTabDef[] = [
   { id: "users", en: "Users & Staff", bn: "ইউজার ও স্টাফ", icon: "👥", group: "manage", roles: ["admin"], ownerOnly: true },
   { id: "support", en: "Support & Reviews", bn: "সাপোর্ট ও রিভিউ", icon: "💬", group: "manage", roles: ["admin", "manager", "cashier"] },
   { id: "settings", en: "Settings", bn: "সেটিংস", icon: "⚙️", group: "manage", roles: ["admin"], ownerOnly: true },
+  { id: "audit", en: "Audit Log", bn: "অডিট লগ", icon: "📋", group: "manage", roles: ["admin"], ownerOnly: true },
   { id: "firebase", en: "Firebase & Launch", bn: "Firebase ও লঞ্চ", icon: "🔥", group: "manage", roles: ["admin"], ownerOnly: true },
   { id: "apps", en: "Apps", bn: "অ্যাপস", icon: "📱", group: "manage", roles: ["admin", "manager", "cashier", "kitchen", "waiter", "delivery", "inventory"] },
 ];
@@ -1412,6 +1541,7 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
         {activeTab === "ads" && <AdsTab userDoc={userDoc} settings={settings} lang={lang} />}
         {activeTab === "content" && <ContentTab userDoc={userDoc} settings={settings} lang={lang} />}
         {activeTab === "settings" && <SettingsTab userDoc={userDoc} settings={settings} lang={lang} />}
+        {activeTab === "audit" && <AuditLogTab lang={lang} />}
         {activeTab === "users" && <UsersTab userDoc={userDoc} settings={settings} lang={lang} />}
         {activeTab === "support" && <SupportTab userDoc={userDoc} products={products} lang={lang} />}
         {activeTab === "inventory" && <InventoryTab userDoc={userDoc} lang={lang} />}

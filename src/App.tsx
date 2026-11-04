@@ -25,7 +25,7 @@ import {
   parseContent, productFromDoc, categoryFromDoc, seedCatalog, settingsFromDoc, tr, tsToIso,
   useCatalog, useLive, useLiveDoc, useSettingsDoc, userFromDoc,
   type Category, type Coupon, type Lang, type Order, type Product, type Reservation,
-  type Settings, type UserDoc,
+  type Review, type Settings, type UserDoc,
 } from "./db";
 import { cancelOrderTx, COMBO_DISCOUNT_PER_LINE, COMBO_MIN_QTY, comboDiscount, HAPPY_HOUR_END, HAPPY_HOUR_PERCENT, HAPPY_HOUR_START, happyHourDiscount, isHappyHour, placeOrderTx, timeToMin, type CartLine } from "./orders";
 import { askAi, buildAiKnowledge } from "./aiAssistant";
@@ -100,13 +100,37 @@ function OpenNowBadge({ settings, lang }: { settings: Settings; lang: Lang }) {
   );
 }
 
+// Stars shown for a product's average rating or a single review.
+// Only real reviews a customer wrote are ever shown — nothing is
+// invented, and a review appears here only after staff approve it.
+function Stars({ rating, size = 15 }: { rating: number; size?: number }) {
+  const full = Math.max(0, Math.min(5, Math.round(rating)));
+  return <span style={{ color: "var(--gold)", fontSize: size, letterSpacing: 1 }} aria-label={`${rating} / 5`}>{"★".repeat(full)}{"☆".repeat(5 - full)}</span>;
+}
+
+function reviewFromDoc(id: string, d: DocumentData): Review {
+  return { id, productId: String(d.productId ?? ""), author: String(d.author ?? ""), rating: Number(d.rating ?? 0), comment: String(d.comment ?? ""), status: String(d.status ?? ""), createdAt: tsToIso(d.createdAt) };
+}
+
+// Food info chips: shown only when the admin filled the field in.
+// A blank field means "not set" and renders nothing — never a guess.
+function FoodInfo({ p, lang }: { p: Product; lang: Lang }) {
+  const spiceLabel = p.spiceLevel === "mild" ? tr(lang, "Mild", "হালকা") : p.spiceLevel === "medium" ? tr(lang, "Medium", "মাঝারি") : p.spiceLevel === "hot" ? tr(lang, "Hot", "ঝাল") : "";
+  const chips: ReactNode[] = [];
+  if (p.veg === "veg") chips.push(<span key="veg" className="chip">🟢 {tr(lang, "Veg", "ভেজ")}</span>);
+  else if (p.veg === "non-veg") chips.push(<span key="nonveg" className="chip">🔴 {tr(lang, "Non-veg", "নন-ভেজ")}</span>);
+  if (spiceLabel) chips.push(<span key="spice" className="chip">🌶️ {spiceLabel}</span>);
+  if (chips.length === 0) return null;
+  return <div className="row" style={{ marginTop: 6 }}>{chips}</div>;
+}
+
 function ProductImage({ p, h }: { p: Product; h?: number }) {
   const [failed, setFailed] = useState(false);
   const src = imgSrc(p.imageKey);
   if (!src || failed) {
     return <div className="flex items-center justify-center" style={{ height: h ?? 160, background: "var(--surface2)" }}><span className="serif" style={{ fontSize: 44, color: "var(--accent)" }}>{(p.nameEn || "C").slice(0, 1)}</span></div>;
   }
-  return <img src={src} alt={p.nameEn} loading="lazy" onError={() => setFailed(true)} style={{ width: "100%", height: h ?? 160, objectFit: "cover", display: "block" }} />;
+  return <img src={src} alt={p.nameEn} loading="lazy" decoding="async" onError={() => setFailed(true)} style={{ width: "100%", height: h ?? 160, objectFit: "cover", display: "block" }} />;
 }
 
 // Frame 2 for every product: a labelled diagram drawn from the live
@@ -189,7 +213,7 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
       <button type="button" onClick={() => onSelect(product)} className="block w-full text-left" style={{ background: "none", border: "none", padding: 0 }}>
         <div style={{ position: "relative", background: "#0d0906", height: "min(44vw, 200px)", overflow: "hidden" }}>
           {slides.map((s, i) => (
-            <img key={s.slug} src={`/img/${s.img}`} alt={i === idx % slides.length ? s.alt : ""} aria-hidden={i !== idx % slides.length} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: "block", opacity: i === idx % slides.length ? 1 : 0, transition: reduced ? "none" : "opacity 0.8s ease" }} />
+            <img key={s.slug} src={`/img/${s.img}`} alt={i === idx % slides.length ? s.alt : ""} aria-hidden={i !== idx % slides.length} decoding="async" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: "block", opacity: i === idx % slides.length ? 1 : 0, transition: reduced ? "none" : "opacity 0.8s ease" }} />
           ))}
         </div>
         <div key={slide.slug} className="flex items-center justify-between px-3 py-2 banner-caption-in" style={{ background: "rgba(22,15,12,.72)", color: "#f5ebdd", gap: 8, flexWrap: "nowrap", height: 40 }}>
@@ -207,8 +231,12 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
 function PromoVideo({ src, label, poster, lang }: { src: string | null; label: string; poster?: string; lang: Lang }) {
   // Big hero video: taller than before with rounded corners, so it reads
   // as the page's main visual. Still silent autoplay loop, no controls.
+  // preload="metadata": the page does not wait for the whole video
+  // file before it becomes usable — the video still autoplays once
+  // enough data has loaded. The old preload="auto" fetched the full
+  // video eagerly and held the menu up behind it.
   if (!src) return poster ? <img src={poster} alt={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000" }} /> : null;
-  return <video src={src} poster={poster} autoPlay muted loop playsInline disablePictureInPicture preload="auto" aria-label={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000", pointerEvents: "none" }} />;
+  return <video src={src} poster={poster} autoPlay muted loop playsInline disablePictureInPicture preload="metadata" aria-label={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000", pointerEvents: "none" }} />;
 }
 
 function promoSrc(choice: string | undefined): string | null {
@@ -227,7 +255,7 @@ function AdSlotView({ slotId, adsJson }: { slotId: string; adsJson?: string | nu
   }
   const src = slot.imageUrl.trim();
   if (!src || !/^https?:\/\//i.test(src)) return null;
-  const img = <img src={src} alt="Advertisement" loading="lazy" style={{ width: "100%", height: 104, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} />;
+  const img = <img src={src} alt="Advertisement" loading="lazy" decoding="async" style={{ width: "100%", height: 104, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} />;
   return <div className="mt-4" aria-label="Advertisement"><p className="text-center small muted">ADVERTISEMENT</p>{slot.linkUrl.trim() ? <a href={slot.linkUrl} target="_blank" rel="noreferrer sponsored">{img}</a> : img}</div>;
 }
 
@@ -358,11 +386,12 @@ function SignInCard({ lang, onSignedIn }: { lang: Lang; onSignedIn: () => void }
   );
 }
 
-function DetailModal({ p, categories, lang, onClose, onAdd, wishlisted, onWish }: {
+function DetailModal({ p, categories, lang, onClose, onAdd, wishlisted, onWish, fbUser, userDoc }: {
   p: Product; categories: Category[]; lang: Lang; onClose: () => void;
   onAdd: (extra: { qty: number; size: string; sugar: string; milk: string; note: string }) => void;
-  wishlisted: boolean; onWish: () => void;
+  wishlisted: boolean; onWish: () => void; fbUser: User | null; userDoc: UserDoc | null;
 }) {
+  const firestore = getDb();
   const [tab, setTab] = useState<"photo" | "ingredients">("photo");
   const [qty, setQty] = useState(1);
   const [size, setSize] = useState("Regular");
@@ -370,6 +399,36 @@ function DetailModal({ p, categories, lang, onClose, onAdd, wishlisted, onWish }
   const [milk, setMilk] = useState("Normal");
   const [note, setNote] = useState("");
   const catName = categories.find((c) => c.id === p.categoryId);
+  // Reviews for this product: approved ones only, newest first.
+  // A new review is created as Pending — staff approve it in the
+  // admin Support tab before it appears here.
+  const { data: approvedReviews } = useLive<Review>(
+    () => (firestore ? query(collection(firestore, "reviews"), where("status", "==", "Approved"), limit(200)) : null),
+    reviewFromDoc,
+  );
+  const { data: myOrders } = useLive<Order>(
+    () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc"), limit(200)) : null),
+    orderFromDoc,
+  );
+  const reviews = approvedReviews.filter((r) => r.productId === p.slug).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const avg = reviews.length ? reviews.reduce((s, r) => s + r.rating, 0) / reviews.length : 0;
+  const hasOrdered = (myOrders ?? []).some((o) => o.items.some((i) => i.productId === p.slug));
+  const [rating, setRating] = useState(5);
+  const [comment, setComment] = useState("");
+  const [reviewMsg, setReviewMsg] = useState("");
+  const [reviewed, setReviewed] = useState(() => {
+    try { return !!fbUser && localStorage.getItem(`cr_reviewed_${fbUser.uid}_${p.slug}`) === "1"; } catch { return false; }
+  });
+  const submitReview = async () => {
+    if (!firestore || !fbUser || !hasOrdered || !comment.trim()) return;
+    await addDoc(collection(firestore, "reviews"), {
+      productId: p.slug, author: userDoc?.name || fbUser.displayName || fbUser.email || "Customer",
+      authorId: fbUser.uid, rating, comment: comment.trim(), status: "Pending", createdAt: serverTimestamp(),
+    });
+    try { localStorage.setItem(`cr_reviewed_${fbUser.uid}_${p.slug}`, "1"); } catch { /* best-effort */ }
+    setReviewed(true);
+    setReviewMsg(tr(lang, "Thank you! Your review is with the admin for approval and will show here once approved.", "ধন্যবাদ! আপনার রিভিউ অনুমোদনের জন্য অ্যাডমিনের কাছে গেছে — অনুমোদন হলে এখানে দেখাবে।"));
+  };
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={p.nameEn} onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -387,6 +446,8 @@ function DetailModal({ p, categories, lang, onClose, onAdd, wishlisted, onWish }
           {tab === "photo" ? <ProductImage p={p} h={260} /> : <IngredientPoster p={p} lang={lang} />}
         </div>
         <p style={{ marginTop: 10 }}>{lang === "bn" ? p.description : p.description}</p>
+        {p.ingredients && <p className="small muted" style={{ marginTop: 4 }}>{tr(lang, "Ingredients:", "উপকরণ:")} {p.ingredients}</p>}
+        <FoodInfo p={p} lang={lang} />
         <p style={{ fontSize: 20, fontWeight: 700 }}>{orderable(p) ? tk(effPrice(p)) : tr(lang, "Price coming soon", "দাম আসছে")}</p>
         <div className="row" style={{ marginTop: 8 }}>
           <label style={{ flex: 1 }}>{tr(lang, "Size", "সাইজ")}<select aria-label="Size" value={size} onChange={(e) => setSize(e.target.value)}><option>Regular</option><option>Large</option><option>Small</option></select></label>
@@ -399,6 +460,34 @@ function DetailModal({ p, categories, lang, onClose, onAdd, wishlisted, onWish }
           <b>{qty}</b>
           <button className="chip" aria-label="Increase quantity" onClick={() => setQty(qty + 1)}>+</button>
           <button className="btn-gold" style={{ flex: 1 }} disabled={!orderable(p)} onClick={() => onAdd({ qty, size, sugar, milk, note })}>{tr(lang, "Add to cart", "কার্টে যোগ করুন")} • {tk(effPrice(p) * qty)}</button>
+        </div>
+        <div style={{ marginTop: 16, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+          <h3 className="serif" style={{ fontSize: 18 }}>{tr(lang, "Reviews", "রিভিউ")}</h3>
+          {reviews.length > 0 ? (
+            <p><Stars rating={avg} /> <b>{avg.toFixed(1)}</b> <span className="small muted">({reviews.length} {tr(lang, "reviews", "টি রিভিউ")})</span></p>
+          ) : (
+            <p className="small muted">{tr(lang, "No reviews yet — be the first to review it after ordering.", "এখনো কোনো রিভিউ নেই — অর্ডার করে প্রথম রিভিউ দিন।")}</p>
+          )}
+          {reviews.map((r) => (
+            <div key={r.id} className="card" style={{ padding: "8px 10px", marginTop: 6 }}>
+              <div className="row" style={{ justifyContent: "space-between" }}><b>{r.author}</b><Stars rating={r.rating} size={13} /></div>
+              <p style={{ margin: "4px 0 0" }}>{r.comment}</p>
+            </div>
+          ))}
+          {!fbUser && <p className="small muted" style={{ marginTop: 10 }}>{tr(lang, "Sign in and order this item to leave a review.", "রিভিউ দিতে সাইন-ইন করে এই আইটেমটি অর্ডার করুন।")}</p>}
+          {fbUser && !hasOrdered && <p className="small muted" style={{ marginTop: 10 }}>{tr(lang, "Only customers who ordered this item can review it.", "শুধু যাঁরা এই আইটেমটি অর্ডার করেছেন, তাঁরাই রিভিউ দিতে পারবেন।")}</p>}
+          {fbUser && hasOrdered && !reviewed && (
+            <div style={{ marginTop: 10 }}>
+              <div className="row" role="radiogroup" aria-label="Star rating">
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button key={n} type="button" className="chip" aria-label={`${n} stars`} onClick={() => setRating(n)} style={{ fontSize: 20, color: n <= rating ? "var(--gold)" : "var(--muted)" }}>{n <= rating ? "★" : "☆"}</button>
+                ))}
+              </div>
+              <input aria-label="Your review" value={comment} onChange={(e) => setComment(e.target.value)} placeholder={tr(lang, "Write a short review…", "ছোট করে রিভিউ লিখুন…")} style={{ marginTop: 8 }} />
+              <button className="btn-gold" style={{ marginTop: 8 }} disabled={!comment.trim()} onClick={() => void submitReview()}>{tr(lang, "Submit review", "রিভিউ জমা দিন")}</button>
+            </div>
+          )}
+          {reviewMsg && <p className="small" role="status" style={{ marginTop: 8 }}>{reviewMsg}</p>}
         </div>
       </div>
     </div>
@@ -427,7 +516,19 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   const [doneReceipt, setDoneReceipt] = useState<Order | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
   useEffect(() => {
-    if (open) { setStep("cart"); setErr(""); window.scrollTo({ top: 0, left: 0, behavior: "auto" }); }
+    if (open) {
+      setStep("cart"); setErr(""); window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      // Coupon wallet handoff: the Account "Use coupon" button stores
+      // the code and opens the cart — pick it up once, then clear it.
+      try {
+        const walletCode = localStorage.getItem("cr_wallet_coupon");
+        if (walletCode) {
+          localStorage.removeItem("cr_wallet_coupon");
+          setCoupon(walletCode.toUpperCase());
+          void checkCoupon(walletCode);
+        }
+      } catch { /* wallet handoff is best-effort */ }
+    }
   }, [open ]);
   // Prefill only empty fields: never overwrite what the user already typed.
   // The old unconditional fill wiped a typed phone number whenever the
@@ -470,8 +571,8 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   const fee = orderType === "delivery" ? (settings.freeDeliveryAt > 0 && afterDiscount >= settings.freeDeliveryAt ? 0 : settings.deliveryFee) : 0;
   const total = afterDiscount + vat + fee;
   const payments = enabledPayments(settings.paymentsJson);
-  const checkCoupon = async () => {
-    const code = coupon.trim().toUpperCase();
+  const checkCoupon = async (codeOverride?: string) => {
+    const code = (codeOverride ?? coupon).trim().toUpperCase();
     if (!code) { setCouponInfo({ status: "idle", discount: 0, note: "", checkedSubtotal: -1 }); return; }
     const firestore = getDb();
     if (!firestore) { setCouponInfo({ status: "error", discount: 0, note: tr(lang, "Could not check the coupon.", "কুপন যাচাই করা যায়নি।"), checkedSubtotal: -1 }); return; }
@@ -567,7 +668,17 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
               <label>{tr(lang, "Full name", "পুরো নাম")}<input aria-label="Full name" required value={name} onChange={(e) => setName(e.target.value)} /></label>
               <label>{tr(lang, "Phone", "ফোন")}<input aria-label="Phone number" required value={phone} onChange={(e) => setPhone(e.target.value)} /></label>
               <label>{tr(lang, "Order type", "অর্ডারের ধরন")}<select aria-label="Order type" value={orderType} onChange={(e) => setOrderType(e.target.value)}><option value="delivery">{tr(lang, "Home delivery", "হোম ডেলিভারি")}</option><option value="takeaway">{tr(lang, "Takeaway", "টেকঅ্যাওয়ে")}</option><option value="dine-in">{tr(lang, "Dine-in", "ডাইন-ইন")}</option></select></label>
-              {orderType === "delivery" && <label>{tr(lang, "Delivery address", "ডেলিভারির ঠিকানা")}<input aria-label="Delivery address" required value={address} onChange={(e) => setAddress(e.target.value)} /></label>}
+              {orderType === "delivery" && (
+                <>
+                  {(userDoc?.savedAddresses ?? []).length > 0 && (
+                    <label>{tr(lang, "Use a saved address", "সংরক্ষিত ঠিকানা ব্যবহার করুন")}<select aria-label="Saved address" value="" onChange={(e) => { if (e.target.value) setAddress(e.target.value); }}>
+                      <option value="">{tr(lang, "Choose a saved address…", "সংরক্ষিত ঠিকানা বেছে নিন…")}</option>
+                      {(userDoc?.savedAddresses ?? []).map((a, i) => <option key={`${a.address}-${i}`} value={a.address}>{a.label ? `${a.label} — ${a.address}` : a.address}</option>)}
+                    </select></label>
+                  )}
+                  <label>{tr(lang, "Delivery address", "ডেলিভারির ঠিকানা")}<input aria-label="Delivery address" required value={address} onChange={(e) => setAddress(e.target.value)} /></label>
+                </>
+              )}
               {orderType === "dine-in" && <label>{tr(lang, "Table", "টেবিল")}<input aria-label="Dine-in table" value={tableLabel} onChange={(e) => setTableLabel(e.target.value)} placeholder="T1" /></label>}
               <label>{tr(lang, "Payment method", "পেমেন্ট মাধ্যম")}<select aria-label="Payment method" value={payment} onChange={(e) => setPayment(e.target.value)}>{payments.map((m) => <option key={m} value={m}>{m}</option>)}</select></label>
               {["bKash", "Nagad", "Rocket", "Bank Transfer"].includes(payment) && (
@@ -649,6 +760,20 @@ function cancelRemainingMs(o: Order, settings: Settings, now: number): number {
   return (settings.cancelWindowMinutes ?? 2) * 60 * 1000 - (now - created);
 }
 
+// Estimated arrival / ready time from the order's real createdAt
+// plus the admin's prep and delivery minutes (Settings). Delivery
+// orders add both; takeaway/dine-in add prep only. Ended orders
+// (Delivered, Completed, Cancelled, Refunded) have no ETA. The time
+// is an estimate from the kitchen's usual pace, never a promise.
+function orderEta(o: Order, settings: Settings): Date | null {
+  if (o.status === "Cancelled" || o.status === "Refunded" || o.status === "Delivered" || o.status === "Completed") return null;
+  const created = Date.parse(o.createdAt);
+  if (!created) return null;
+  const prep = settings.prepMinutes ?? 20;
+  const del = o.orderType === "delivery" ? (settings.deliveryMinutes ?? 20) : 0;
+  return new Date(created + (prep + del) * 60000);
+}
+
 // The customer cancel button, shared by the Track page and the
 // Account order list. It only renders inside the window — after the
 // window lapses it disappears entirely — and it asks for
@@ -711,6 +836,14 @@ const fmtDate = (raw: string) => {
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
 };
 
+// Reservation status in the customer's language — the customer
+// sees "নিশ্চিত" when the admin confirms, never the raw English.
+const reservationStatusLabel = (s: string, lang: Lang) =>
+  s === "Confirmed" ? tr(lang, "Confirmed", "নিশ্চিত")
+  : s === "Cancelled" ? tr(lang, "Cancelled", "বাতিল")
+  : s === "Completed" ? tr(lang, "Completed", "সম্পন্ন")
+  : tr(lang, "Pending", "অপেক্ষমাণ");
+
 function TrackView({ fbUser, products, settings, lang }: { fbUser: User | null; products: Product[]; settings: Settings; lang: Lang }) {
   const firestore = getDb();
   const { data: orders, loading: ordersLoading, error: ordersError } = useLive<Order>(
@@ -733,6 +866,10 @@ function TrackView({ fbUser, products, settings, lang }: { fbUser: User | null; 
       {shown.map((o) => {
         const isEnded = o.status === "Cancelled" || o.status === "Refunded";
         const stageIdx = o.status === "Completed" ? TRACK_STAGES.length - 1 : TRACK_STAGES.indexOf(o.status);
+        const eta = orderEta(o, settings);
+        const etaText = eta ? eta.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
+        const etaPassed = eta ? now > eta.getTime() : false;
+        const progressPct = stageIdx < 0 ? 0 : Math.round(((stageIdx + 1) / TRACK_STAGES.length) * 100);
         return (
           <div key={o.id} className="card" style={{ marginTop: 12, padding: 14 }}>
             <div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div>
@@ -741,9 +878,23 @@ function TrackView({ fbUser, products, settings, lang }: { fbUser: User | null; 
               <span className="small muted">{o.paymentMethod} • {paymentStatusLabel(o.paymentStatus, lang)} • {o.createdAt ? new Date(o.createdAt).toLocaleString("en-GB") : ""}</span>
             </div>
             {!isEnded && (
-              <div className="row" style={{ marginTop: 8 }}>
-                {TRACK_STAGES.map((s, i) => <span key={s} className={`chip ${i <= stageIdx ? "chip-on" : ""}`} style={{ padding: "4px 8px", fontSize: 12 }}>{statusLabel(s, lang)}</span>)}
-              </div>
+              <>
+                <div className="row" style={{ marginTop: 8 }}>
+                  {TRACK_STAGES.map((s, i) => <span key={s} className={`chip ${i <= stageIdx ? "chip-on" : ""}`} style={{ padding: "4px 8px", fontSize: 12 }}>{statusLabel(s, lang)}</span>)}
+                </div>
+                <div style={{ height: 8, background: "var(--surface2)", borderRadius: 4, marginTop: 8 }}><div style={{ width: `${progressPct}%`, height: "100%", background: "var(--gold)", borderRadius: 4, transition: "width 0.5s ease" }} /></div>
+                {eta && (
+                  <p style={{ marginTop: 8, marginBottom: 0, fontWeight: 700 }}>
+                    {o.orderType === "delivery"
+                      ? (etaPassed
+                        ? `🛵 ${tr(lang, "On the way — arriving soon", "ডেলিভারির পথে — শীঘ্রই পৌঁছাবে")}`
+                        : `🛵 ${tr(lang, "Arriving around", "পৌঁছাবে আনুমানিক")} ${etaText}`)
+                      : (etaPassed
+                        ? `⏱️ ${tr(lang, "Almost ready", "প্রায় তৈরি")}`
+                        : `⏱️ ${tr(lang, "Ready around", "তৈরি হবে আনুমানিক")} ${etaText}`)}
+                  </p>
+                )}
+              </>
             )}
             <ul style={{ marginTop: 8, fontSize: 14 }}>{o.items.map((it, i) => <li key={i}>{it.qty} × {orderItemName(products, it, lang)}</li>)}</ul>
             <div style={{ marginTop: 8 }}>
@@ -763,7 +914,7 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
   const firestore = getDb();
   const { data: mine, loading: mineLoading, error: mineError } = useLive<Reservation>(
     () => (firestore && fbUser ? query(collection(firestore, "reservations"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
-    (id, d) => ({ id, name: String(d.name ?? ""), phone: String(d.phone ?? ""), email: String(d.email ?? ""), date: String(d.date ?? ""), time: String(d.time ?? ""), guests: Number(d.guests ?? 2), requests: String(d.requests ?? ""), status: String(d.status ?? "Pending"), tableLabel: String(d.tableLabel ?? ""), userId: String(d.userId ?? ""), createdAt: "" }),
+    (id, d) => ({ id, name: String(d.name ?? ""), phone: String(d.phone ?? ""), email: String(d.email ?? ""), date: String(d.date ?? ""), time: String(d.time ?? ""), guests: Number(d.guests ?? 2), requests: String(d.requests ?? ""), status: String(d.status ?? "Pending"), tableLabel: String(d.tableLabel ?? ""), userId: String(d.userId ?? ""), createdAt: "", reminderAt: tsToIso(d.reminderAt) }),
   );
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -807,18 +958,27 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
       {mineError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your reservations. Please try again.", "আপনার রিজার্ভেশনগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
       {mineLoading && !mineError && <p className="muted small">{tr(lang, "Loading your reservations…", "রিজার্ভেশনগুলো লোড হচ্ছে…")}</p>}
       {!mineLoading && mine.length === 0 && !mineError && <p className="muted small">{tr(lang, "No reservations yet.", "এখনো কোনো রিজার্ভেশন নেই।")}</p>}
-      {mine.map((r) => <div key={r.id} className="card" style={{ marginTop: 8, padding: 12 }}><b>{fmtDate(r.date)} {r.time}</b> • {r.guests} {tr(lang, "guests", "অতিথি")} • <span className="chip">{r.status}</span><p className="small muted">{tr(lang, "Table:", "টেবিল:")} {r.tableLabel || tr(lang, "To be assigned", "পরে জানানো হবে")}</p></div>)}
+      {mine.map((r) => <div key={r.id} className="card" style={{ marginTop: 8, padding: 12 }}><b>{fmtDate(r.date)} {r.time}</b> • {r.guests} {tr(lang, "guests", "অতিথি")} • <span className="chip" style={r.status === "Confirmed" ? { background: "#2e7d32", color: "#fff", borderColor: "transparent" } : undefined}>{reservationStatusLabel(r.status, lang)}</span><p className="small muted">{tr(lang, "Table:", "টেবিল:")} {r.tableLabel || tr(lang, "To be assigned", "পরে জানানো হবে")}</p>{r.reminderAt && <p className="small" style={{ margin: "4px 0 0" }}>🔔 {tr(lang, "Reminder sent", "মনে করানো হয়েছে")} — {new Date(r.reminderAt).toLocaleString("en-GB")}</p>}</div>)}
     </div>
   );
 }
 
-function AccountView({ fbUser, userDoc, products, settings, lang, onLoginSuccess }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; settings: Settings; lang: Lang; onLoginSuccess: () => void }) {
+function AccountView({ fbUser, userDoc, products, settings, lang, onLoginSuccess, onUseCoupon }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; settings: Settings; lang: Lang; onLoginSuccess: () => void; onUseCoupon: (code: string) => void }) {
   const firestore = getDb();
   const { data: orders, loading: ordersLoading, error: ordersError } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
     orderFromDoc,
   );
+  const { data: coupons } = useLive<Coupon>(
+    () => (firestore ? query(collection(firestore, "coupons"), orderBy("code")) : null),
+    (id, d) => ({ id, code: String(d.code ?? id), kind: String(d.kind ?? "percent"), value: Number(d.value ?? 0), minPurchase: Number(d.minPurchase ?? 0), maxDiscount: d.maxDiscount == null ? null : Number(d.maxDiscount), usageLimit: d.usageLimit == null ? null : Number(d.usageLimit), usedCount: Number(d.usedCount ?? 0), active: d.active !== false, expiresAt: String(d.expiresAt ?? ""), description: String(d.description ?? ""), firstOrderOnly: d.firstOrderOnly === true }),
+  );
+  // Coupons the customer can actually use: active ones, and a
+  // first-order-only coupon is hidden once they already have an order
+  // (checkout would reject it anyway).
+  const myCoupons = coupons.filter((c) => c.active && !(c.firstOrderOnly && orders.length > 0));
   const [addrDraft, setAddrDraft] = useState("");
+  const [addrLabel, setAddrLabel] = useState("Home");
   const [msgDraft, setMsgDraft] = useState("");
   const [msgDone, setMsgDone] = useState("");
   const [receiptOrder, setReceiptOrder] = useState<Order | null>(null);
@@ -852,6 +1012,20 @@ function AccountView({ fbUser, userDoc, products, settings, lang, onLoginSuccess
             : <p className="small muted">{lang === "bn" ? `${settings.loyaltyRedeemPoints - (userDoc?.loyaltyPoints ?? 0)} পয়েন্ট বাকি থাকলে প্রথম ছাড় পাবেন।` : `${settings.loyaltyRedeemPoints - (userDoc?.loyaltyPoints ?? 0)} more points to your first reward.`}</p>;
         })()}
       </div>
+      <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My coupons", "আমার কুপনগুলো")}</h3>
+      {myCoupons.length === 0 && <p className="muted small">{tr(lang, "No coupons available right now.", "এখন কোনো কুপন নেই।")}</p>}
+      {myCoupons.map((c) => (
+        <div key={c.id} className="card" style={{ padding: "10px 12px", marginTop: 6 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <b>{c.code}</b>
+            <span>{c.kind === "percent" ? `${c.value}% ${tr(lang, "off", "ছাড়")}` : `${tk(c.value)} ${tr(lang, "off", "ছাড়")}`}</span>
+          </div>
+          <p className="small muted" style={{ margin: "4px 0 0" }}>
+            {c.firstOrderOnly ? `${tr(lang, "First order only", "শুধু প্রথম অর্ডার")} • ` : ""}{c.minPurchase > 0 ? `${tr(lang, "Min purchase", "সর্বনিম্ন কেনাকাটা")} ${tk(c.minPurchase)} • ` : ""}{c.expiresAt ? `${tr(lang, "Expires", "মেয়াদ")} ${fmtDate(c.expiresAt)}` : tr(lang, "No expiry", "মেয়াদের শেষ নেই")}
+          </p>
+          <button className="btn-gold" style={{ marginTop: 8, padding: "6px 14px" }} onClick={() => onUseCoupon(c.code)}>{tr(lang, "Use coupon", "কুপন ব্যবহার করুন")}</button>
+        </div>
+      ))}
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My orders", "আমার অর্ডারগুলো")}</h3>
       {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
       {ordersLoading && !ordersError && <p className="muted small">{tr(lang, "Loading your orders…", "অর্ডারগুলো লোড হচ্ছে…")}</p>}
@@ -862,10 +1036,21 @@ function AccountView({ fbUser, userDoc, products, settings, lang, onLoginSuccess
       {(!userDoc || userDoc.wishlist.length === 0) && <p className="muted small">{tr(lang, "No favourites yet — tap the heart on a product.", "এখনো প্রিয় আইটেম নেই — প্রোডাক্টের হার্ট চাপুন।")}</p>}
       <div className="row">{(userDoc?.wishlist ?? []).map((slug) => { const p = products.find((x) => x.slug === slug); return p ? <span key={slug} className="chip">{displayName(p, lang)}</span> : null; })}</div>
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My addresses", "আমার ঠিকানাগুলো")}</h3>
-      <div className="row">{(userDoc?.addresses ?? []).map((a) => <span key={a} className="chip">{a}</span>)}</div>
+      {(userDoc?.savedAddresses ?? []).length === 0 && <p className="muted small">{tr(lang, "No saved addresses yet — add one below and pick it at checkout.", "এখনো সংরক্ষিত ঠিকানা নেই — নিচে যোগ করুন, চেকআউটে বেছে নিতে পারবেন।")}</p>}
+      {(userDoc?.savedAddresses ?? []).map((a, i) => (
+        <div key={`${a.label}-${a.address}-${i}`} className="card" style={{ padding: "8px 10px", marginTop: 6 }}>
+          <b>{a.label === "Home" ? tr(lang, "Home", "বাড়ি") : a.label === "Office" ? tr(lang, "Office", "অফিস") : a.label === "Other" ? tr(lang, "Other", "অন্য") : (a.label || tr(lang, "Address", "ঠিকানা"))}</b> — {a.address}
+          <button className="btn-ghost" style={{ padding: "2px 8px", marginLeft: 8 }} onClick={() => { if (!firestore || !userDoc) return; const next = userDoc.savedAddresses.filter((_, j) => j !== i); void updateDoc(doc(firestore, "users", fbUser.uid), { savedAddresses: next, addresses: next.map((x) => x.address) }); }}>{tr(lang, "Remove", "সরান")}</button>
+        </div>
+      ))}
       <div className="row" style={{ marginTop: 8 }}>
+        <select aria-label="Address label" value={addrLabel} onChange={(e) => setAddrLabel(e.target.value)} style={{ width: 110 }}>
+          <option value="Home">{tr(lang, "Home", "বাড়ি")}</option>
+          <option value="Office">{tr(lang, "Office", "অফিস")}</option>
+          <option value="Other">{tr(lang, "Other", "অন্য")}</option>
+        </select>
         <input aria-label="New address" value={addrDraft} onChange={(e) => setAddrDraft(e.target.value)} placeholder={tr(lang, "House, road, area", "বাড়ি, রাস্তা, এলাকা")} style={{ flex: 1 }} />
-        <button className="btn-ghost" onClick={() => { if (!firestore || !addrDraft.trim() || !userDoc) return; void updateDoc(doc(firestore, "users", fbUser.uid), { addresses: [...userDoc.addresses, addrDraft.trim()] }); setAddrDraft(""); }}>{tr(lang, "Add address", "ঠিকানা যোগ করুন")}</button>
+        <button className="btn-ghost" onClick={() => { if (!firestore || !addrDraft.trim() || !userDoc) return; const next = [...userDoc.savedAddresses, { label: addrLabel, address: addrDraft.trim() }]; void updateDoc(doc(firestore, "users", fbUser.uid), { savedAddresses: next, addresses: next.map((x) => x.address) }); setAddrDraft(""); }}>{tr(lang, "Add address", "ঠিকানা যোগ করুন")}</button>
       </div>
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "Message the cafe", "ক্যাফেকে মেসেজ করুন")}</h3>
       <label>{tr(lang, "Your message", "আপনার মেসেজ")}<textarea aria-label="Message to the cafe" rows={3} value={msgDraft} onChange={(e) => setMsgDraft(e.target.value)} /></label>
@@ -1119,6 +1304,23 @@ export function App() {
 
   const { categories, products, loading: catalogLoading, error: catalogError } = useCatalog();
   const { data: settings } = useSettingsDoc();
+  // Approved reviews only — the average per product shown on menu
+  // cards comes from these real, staff-approved reviews.
+  const { data: approvedReviews } = useLive<Review>(
+    () => (getDb() ? query(collection(getDb()!, "reviews"), where("status", "==", "Approved"), limit(200)) : null),
+    reviewFromDoc,
+  );
+  const reviewAvg = useMemo(() => {
+    const sums = new Map<string, { sum: number; count: number }>();
+    for (const r of approvedReviews) {
+      const cur = sums.get(r.productId) ?? { sum: 0, count: 0 };
+      cur.sum += r.rating; cur.count += 1;
+      sums.set(r.productId, cur);
+    }
+    const out = new Map<string, { avg: number; count: number }>();
+    for (const [k, v] of sums) out.set(k, { avg: v.sum / v.count, count: v.count });
+    return out;
+  }, [approvedReviews]);
   const content = parseContent(settings.contentJson);
   const isStaff = userDoc ? isStaffRole(userDoc.role) : false;
 
@@ -1211,7 +1413,7 @@ export function App() {
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><ReserveView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} lang={lang} /></main>
       ) : view === "account" ? (
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}>
-          <AccountView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} products={products} settings={settings} lang={lang} onLoginSuccess={onLoginSuccess} />
+          <AccountView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} products={products} settings={settings} lang={lang} onLoginSuccess={onLoginSuccess} onUseCoupon={(code) => { try { localStorage.setItem("cr_wallet_coupon", code); } catch { /* wallet handoff is best-effort */ } setCartOpen(true); }} />
           <InstallAppCard variant="customer" lang={lang} />
         </main>
       ) : view === "info" ? (
@@ -1259,6 +1461,10 @@ export function App() {
                   <div style={{ padding: 12 }}>
                     <h3 style={{ margin: 0 }}>{displayName(p, lang)}</h3>
                     <p className="small muted" style={{ margin: "4px 0 0" }}>{p.description}</p>
+                    {reviewAvg.get(p.slug) && (
+                      <p style={{ margin: "4px 0 0" }}><Stars rating={reviewAvg.get(p.slug)!.avg} size={13} /> <span className="small muted">{reviewAvg.get(p.slug)!.avg.toFixed(1)} ({reviewAvg.get(p.slug)!.count})</span></p>
+                    )}
+                    <FoodInfo p={p} lang={lang} />
                     <div className="row" style={{ marginTop: 6 }}>
                       {p.bestSeller && <span className="chip" style={{ padding: "3px 9px", fontSize: 12, fontWeight: 800, background: "var(--gold)", color: "#1a1207", borderColor: "transparent" }}>★ {tr(lang, "Popular", "জনপ্রিয়")}</span>}
                       {p.isNew && <span className="chip" style={{ padding: "2px 7px", fontSize: 11 }}>{tr(lang, "New", "নতুন")}</span>}
@@ -1296,7 +1502,7 @@ export function App() {
               <h2 className="serif" style={{ fontSize: 24 }}>{tr(lang, "Gallery — real Cafe Reza posters", "গ্যালারি — ক্যাফে রেজার আসল পোস্টার")}</h2>
               <div className="grid products" style={{ marginTop: 10 }}>
                 {["poster-faluda-red.jpg", "poster-grapes2.jpg", "poster-blue.jpg", "poster-dragon.jpg", "tray2.jpg", "tray.jpg"].map((f) => (
-                  <img key={f} src={`/img/${f}`} alt={f} loading="lazy" style={{ width: "100%", height: 160, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} />
+                  <img key={f} src={`/img/${f}`} alt={f} loading="lazy" decoding="async" style={{ width: "100%", height: 160, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} />
                 ))}
               </div>
             </section>
@@ -1305,7 +1511,7 @@ export function App() {
           <section className="card" style={{ padding: 16, marginTop: 24 }}>
             <h2 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Printed menu", "ছাপা মেনু")}</h2>
             <p className="small muted">{tr(lang, "The owner's printed menu photo, for price reference.", "দাম যাচাইয়ের জন্য মালিকের ছাপা মেনুর ছবি।")}</p>
-            <img src="/img/menu-photo.jpg?v=2" alt="Cafe Reza printed menu with prices" loading="lazy" style={{ width: "100%", borderRadius: 12, marginTop: 8 }} />
+            <img src="/img/menu-photo.jpg?v=2" alt="Cafe Reza printed menu with prices" loading="lazy" decoding="async" style={{ width: "100%", borderRadius: 12, marginTop: 8 }} />
           </section>
           <AdSlotView slotId="footer" adsJson={settings.adsJson} />
         </main>
@@ -1317,6 +1523,7 @@ export function App() {
           onAdd={(extra) => { addToCart(detail, extra); setDetail(null); }}
           wishlisted={userDoc?.wishlist.includes(detail.slug) ?? false}
           onWish={() => toggleWishlist(detail.slug)}
+          fbUser={fbUser} userDoc={userDoc}
         />
       )}
       <CartDrawer open={cartOpen} onClose={() => setCartOpen(false)} cart={cart} setCart={setCart} products={products} settings={settings} fbUser={fbUser} userDoc={userDoc} lang={lang} />

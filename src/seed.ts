@@ -101,6 +101,11 @@ export const DEFAULT_SETTINGS = {
   riskCautionPct: 25,
   riskRiskyPct: 50,
   geminiApiKey: "",
+  // Live tracking: ETA = order time + prep (+ delivery for delivery
+  // orders). Kitchen: an order waiting longer than this counts as late.
+  prepMinutes: 20,
+  deliveryMinutes: 20,
+  kitchenLateMinutes: 30,
 };
 
 export const BANNER_SLIDES: Array<{ slug: string; img: string; alt: string }> = [

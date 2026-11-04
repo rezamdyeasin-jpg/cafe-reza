@@ -38,6 +38,7 @@ export type Product = {
   categoryId: string; price: number; discountPrice: number | null; costPrice: number;
   stock: number; available: boolean; featured: boolean; bestSeller: boolean; isNew: boolean;
   prepTime: number; imageKey: string | null; imageKey2: string | null; ingredients: string; sortOrder: number;
+  spiceLevel: string; veg: string;
 };
 export type Settings = {
   cafeName: string; tagline: string; taglineBn: string; address: string; phone: string; email: string; facebook: string;
@@ -57,6 +58,10 @@ export type Settings = {
   // The parent/user pastes it here; it must be restricted in Google
   // Cloud Console to the cafe's own domain (cafe-reza.web.app) first.
   geminiApiKey: string;
+  // Live tracking + kitchen timers (admin Settings, in minutes):
+  // prep = kitchen prep time, delivery = rider time, late = when an
+  // order waiting in the kitchen counts as late.
+  prepMinutes: number; deliveryMinutes: number; kitchenLateMinutes: number;
 };
 export type Coupon = { id: string; code: string; kind: string; value: number; minPurchase: number; maxDiscount: number | null; usageLimit: number | null; usedCount: number; active: boolean; expiresAt: string; description: string; firstOrderOnly?: boolean };
 export type OrderItem = { productId: string; name: string; qty: number; price: number; size: string; note: string };
@@ -69,8 +74,9 @@ export type Order = {
   paidAmount: number; changeAmount: number; tableLabel: string; notes: string; staffName: string;
   items: OrderItem[]; couponCode: string; createdAt: string;
 };
-export type Reservation = { id: string; name: string; phone: string; email: string; date: string; time: string; guests: number; requests: string; status: string; tableLabel: string; userId: string; createdAt: string };
-export type UserDoc = { id: string; name: string; email: string; phone: string; role: string; status: string; loyaltyPoints: number; tier: string; orderCount: number; addresses: string[]; wishlist: string[]; createdAt: string };
+export type Reservation = { id: string; name: string; phone: string; email: string; date: string; time: string; guests: number; requests: string; status: string; tableLabel: string; userId: string; createdAt: string; reminderAt: string };
+export type UserDoc = { id: string; name: string; email: string; phone: string; role: string; status: string; loyaltyPoints: number; tier: string; orderCount: number; addresses: string[]; savedAddresses: Array<{ label: string; address: string }>; wishlist: string[]; createdAt: string };
+export type AuditLogEntry = { id: string; actorName: string; action: string; detail: string; createdAt: string };
 export type MessageDoc = { id: string; userId: string; guestName: string; guestPhone: string; orderNo: string; author: string; authorName: string; body: string; readFlag: boolean; createdAt: string };
 export type Ticket = { id: string; userId: string; name: string; phone: string; category: string; priority: string; status: string; message: string; reply: string; createdAt: string };
 export type Review = { id: string; productId: string; author: string; rating: number; comment: string; status: string; createdAt: string };
@@ -129,6 +135,9 @@ export function productFromDoc(id: string, d: DocumentData): Product {
     costPrice: Number(p.costPrice ?? 0), stock: Number(p.stock ?? 0), available: p.available !== false,
     featured: !!p.featured, bestSeller: !!p.bestSeller, isNew: !!p.isNew, prepTime: Number(p.prepTime ?? 10),
     imageKey: p.imageKey ?? null, imageKey2: p.imageKey2 ?? null, ingredients: p.ingredients ?? "",
+    // Food info: "" means the admin has not filled it in — the
+    // customer side shows nothing for it rather than a guess.
+    spiceLevel: p.spiceLevel ?? "", veg: p.veg ?? "",
     sortOrder: Number(p.sortOrder ?? 0),
   };
 }
@@ -160,11 +169,20 @@ export function expenseFromDoc(id: string, d: DocumentData): Expense {
 
 export function userFromDoc(id: string, d: DocumentData): UserDoc {
   const u = d as Partial<UserDoc> & { createdAt?: unknown };
+  const legacy = Array.isArray(u.addresses) ? (u.addresses as string[]) : [];
+  // Labelled addresses live in `savedAddresses` ({label, address});
+  // older profiles only have plain strings in `addresses`, which
+  // read back as unlabeled entries so nothing saved before is lost.
+  const savedRaw = (u as { savedAddresses?: unknown }).savedAddresses;
+  const savedAddresses: Array<{ label: string; address: string }> = Array.isArray(savedRaw)
+    ? (savedRaw as Array<{ label?: unknown; address?: unknown }>).filter((x) => typeof x?.address === "string" && x.address.trim()).map((x) => ({ label: typeof x.label === "string" ? x.label : "", address: String(x.address) }))
+    : legacy.map((a) => ({ label: "", address: a }));
   return {
     id, name: u.name ?? "", email: u.email ?? "", phone: u.phone ?? "", role: u.role ?? "customer",
     status: u.status ?? "active", loyaltyPoints: Number(u.loyaltyPoints ?? 0), tier: u.tier ?? "Bronze",
     orderCount: Number(u.orderCount ?? 0),
-    addresses: Array.isArray(u.addresses) ? (u.addresses as string[]) : [],
+    addresses: legacy,
+    savedAddresses,
     wishlist: Array.isArray(u.wishlist) ? (u.wishlist as string[]) : [],
     createdAt: tsToIso(u.createdAt),
   };
@@ -203,7 +221,7 @@ export async function seedCatalog(): Promise<{ inserted: number; categories: num
           slug: p.slug, nameEn: p.en, nameBn: p.bn, description: p.desc, categoryId: p.categoryId,
           price: p.price, discountPrice: null, costPrice: 0, stock: 100, available: p.avail,
           featured: p.feat, bestSeller: p.best, isNew: p.isNew, prepTime: 10,
-          imageKey: p.img, imageKey2: p.img2, ingredients: p.ing, sortOrder: i + 1, updatedAt: serverTimestamp(),
+          imageKey: p.img, imageKey2: p.img2, ingredients: p.ing, spiceLevel: "", veg: "", sortOrder: i + 1, updatedAt: serverTimestamp(),
         });
         inserted++;
       }
