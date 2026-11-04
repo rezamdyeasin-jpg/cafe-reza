@@ -13,12 +13,12 @@ import {
   updateDoc, where, type DocumentData,
 } from "firebase/firestore";
 import {
-  getDb, isFirebaseConfigured, loginWithFacebook, loginWithGoogle, signOutUser,
+  getAuthInstance, getDb, isFirebaseConfigured, loginWithFacebook, loginWithGoogle, signOutUser,
   startPhoneSignIn, confirmPhoneCode, watchAuth, MISSING_CONFIG_BN, ensureUserDoc,
   type PhoneConfirmation,
 } from "./firebase";
 import {
-  BANNER_SLIDES, MAP_COORDS, MAPS_LINK,
+  BANNER_SLIDES, MAP_COORDS, MAPS_LINK, OWNER_EMAIL,
 } from "./seed";
 import {
   AD_SLOT_DEFS, enabledPayments, isStaffRole, orderFromDoc, parseAds, parseBannerSelection,
@@ -296,7 +296,14 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   useEffect(() => {
     if (open) { setStep("cart"); setErr(""); window.scrollTo({ top: 0, left: 0, behavior: "auto" }); }
   }, [open ]);
-  useEffect(() => { if (userDoc) { setName(userDoc.name); setPhone(userDoc.phone); } }, [userDoc]);
+  // Prefill only empty fields: never overwrite what the user already typed.
+  // The old unconditional fill wiped a typed phone number whenever the
+  // profile snapshot re-fired while the drawer was open.
+  useEffect(() => {
+    if (!userDoc) return;
+    setName((v) => (v === "" ? userDoc.name : v));
+    setPhone((v) => (v === "" ? userDoc.phone : v));
+  }, [userDoc]);
   if (!open) return null;
   const lines: CartLine[] = cart.map((c) => {
     const p = products.find((x) => x.slug === c.productId);
@@ -411,7 +418,7 @@ const TRACK_STAGES = ["Pending", "Confirmed", "Preparing", "Ready", "Out for Del
 
 function TrackView({ fbUser, lang }: { fbUser: User | null; lang: Lang }) {
   const firestore = getDb();
-  const { data: orders } = useLive<Order>(
+  const { data: orders, error: ordersError } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
     orderFromDoc,
   );
@@ -422,7 +429,8 @@ function TrackView({ fbUser, lang }: { fbUser: User | null; lang: Lang }) {
     <div>
       <h2 className="serif" style={{ fontSize: 22 }}>{tr(lang, "Track your order", "অর্ডার ট্র্যাক করুন")}</h2>
       <label>{tr(lang, "Search by order number", "অর্ডার নম্বর দিয়ে খুঁজুন")}<input aria-label="Search by order number" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="CR-XXXXXX" /></label>
-      {shown.length === 0 && <p className="muted">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
+      {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
+      {shown.length === 0 && !ordersError && <p className="muted">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
       {shown.map((o) => {
         const stageIdx = TRACK_STAGES.indexOf(o.status);
         return (
@@ -442,7 +450,7 @@ function TrackView({ fbUser, lang }: { fbUser: User | null; lang: Lang }) {
 
 function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: UserDoc | null; lang: Lang }) {
   const firestore = getDb();
-  const { data: mine } = useLive<Reservation>(
+  const { data: mine, error: mineError } = useLive<Reservation>(
     () => (firestore && fbUser ? query(collection(firestore, "reservations"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
     (id, d) => ({ id, name: String(d.name ?? ""), phone: String(d.phone ?? ""), email: String(d.email ?? ""), date: String(d.date ?? ""), time: String(d.time ?? ""), guests: Number(d.guests ?? 2), requests: String(d.requests ?? ""), status: String(d.status ?? "Pending"), tableLabel: String(d.tableLabel ?? ""), userId: String(d.userId ?? ""), createdAt: "" }),
   );
@@ -454,7 +462,12 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
   const [requests, setRequests] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => { if (userDoc) { setName(userDoc.name); setPhone(userDoc.phone); } }, [userDoc]);
+  // Prefill only empty fields: never overwrite what the user already typed.
+  useEffect(() => {
+    if (!userDoc) return;
+    setName((v) => (v === "" ? userDoc.name : v));
+    setPhone((v) => (v === "" ? userDoc.phone : v));
+  }, [userDoc]);
   if (!fbUser) return <p className="muted">{tr(lang, "Sign in to book a table.", "টেবিল বুক করতে সাইন-ইন করুন।")}</p>;
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -480,7 +493,8 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
         {msg && <p className="small" role="status">{msg}</p>}
       </form>
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My reservations", "আমার রিজার্ভেশনগুলো")}</h3>
-      {mine.length === 0 && <p className="muted small">{tr(lang, "No reservations yet.", "এখনো কোনো রিজার্ভেশন নেই।")}</p>}
+      {mineError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your reservations. Please try again.", "আপনার রিজার্ভেশনগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
+      {mine.length === 0 && !mineError && <p className="muted small">{tr(lang, "No reservations yet.", "এখনো কোনো রিজার্ভেশন নেই।")}</p>}
       {mine.map((r) => <div key={r.id} className="card" style={{ marginTop: 8, padding: 12 }}><b>{r.date} {r.time}</b> • {r.guests} {tr(lang, "guests", "অতিথি")} • <span className="chip">{r.status}</span><p className="small muted">{tr(lang, "Table:", "টেবিল:")} {r.tableLabel || tr(lang, "To be assigned", "পরে জানানো হবে")}</p></div>)}
     </div>
   );
@@ -488,7 +502,7 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
 
 function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; lang: Lang; onLoginSuccess: () => void }) {
   const firestore = getDb();
-  const { data: orders } = useLive<Order>(
+  const { data: orders, error: ordersError } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
     orderFromDoc,
   );
@@ -512,7 +526,8 @@ function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUs
         </div>
       </div>
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My orders", "আমার অর্ডারগুলো")}</h3>
-      {orders.length === 0 && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
+      {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
+      {orders.length === 0 && !ordersError && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
       {orders.slice(0, 10).map((o) => <div key={o.id} className="card" style={{ marginTop: 8, padding: 12 }}><div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div><p className="small muted">{o.status} • {o.paymentMethod} • {o.paymentStatus}</p></div>)}
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "Favourites", "প্রিয় আইটেম")}</h3>
       {(!userDoc || userDoc.wishlist.length === 0) && <p className="muted small">{tr(lang, "No favourites yet — tap the heart on a product.", "এখনো প্রিয় আইটেম নেই — প্রোডাক্টের হার্ট চাপুন।")}</p>}
@@ -597,9 +612,12 @@ export function App() {
     setLoginSuccess(true);
     window.setTimeout(() => {
       setLoginSuccess(false);
-      // Read the live route here: the view captured when sign-in started
-      // is stale by the time the popup resolves (the app re-rendered on
-      // the auth-state change), so the old guard never navigated.
+      // The owner lands on the admin panel right after signing in (the
+      // owner's choice); customers stay on the shop. Read the live auth
+      // user here: fbUser/userDoc in this closure are stale from before
+      // sign-in, and so is the view captured when sign-in started.
+      const u = getAuthInstance()?.currentUser ?? null;
+      if ((u?.email ?? "").toLowerCase() === OWNER_EMAIL) { navigate("admin"); return; }
       const head = window.location.hash.replace(/^#\/?/, "").split("/")[0];
       if (head === "account") navigate("store");
     }, 1500);
@@ -649,6 +667,11 @@ export function App() {
     const unsub = onSnapshot(doc(firestore, "users", fbUser.uid), (snap) => {
       if (snap.exists()) setUserDoc(userFromDoc(snap.id, snap.data() as DocumentData));
       else { setUserDoc(null); void ensureUserDoc(fbUser); }
+    }, (e) => {
+      // A listener error must never become an uncaught page error: log it
+      // and keep the signed-in session usable without a profile.
+      console.error("user profile listener failed", e);
+      setUserDoc(null);
     });
     return unsub;
   }, [fbUser]);
