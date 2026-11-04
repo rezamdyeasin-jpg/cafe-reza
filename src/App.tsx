@@ -419,8 +419,29 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
 }
 
 const TRACK_STAGES = ["Pending", "Confirmed", "Preparing", "Ready", "Out for Delivery", "Delivered"];
+// Order status in the customer's language, with a clear badge colour:
+// gold = waiting / in progress, green = done, red = cancelled / refunded.
+const STATUS_BN: Record<string, string> = {
+  Pending: "অপেক্ষমাণ", Confirmed: "নিশ্চিত", Preparing: "তৈরি হচ্ছে",
+  Ready: "প্রস্তুত", "Out for Delivery": "ডেলিভারির পথে", Delivered: "ডেলিভার্ড",
+  Completed: "সম্পন্ন", Cancelled: "বাতিল", Refunded: "ফেরত দেওয়া হয়েছে",
+};
+const PAYMENT_STATUS_BN: Record<string, string> = {
+  Unpaid: "অপরিশোধিত", Paid: "পরিশোধিত", "Pending verification": "যাচাইয়ের অপেক্ষায়",
+};
+const statusLabel = (s: string, lang: Lang) => (lang === "bn" ? (STATUS_BN[s] ?? s) : s);
+const paymentStatusLabel = (s: string, lang: Lang) => (lang === "bn" ? (PAYMENT_STATUS_BN[s] ?? s) : s);
+const statusBadgeStyle = (s: string) => {
+  if (s === "Cancelled" || s === "Refunded") return { background: "var(--bad)", color: "#fff" };
+  if (s === "Delivered" || s === "Completed") return { background: "var(--good)", color: "#fff" };
+  return { background: "var(--gold)", color: "#1a1207" };
+};
+const orderItemName = (products: Product[], it: { productId: string; name: string }, lang: Lang) => {
+  const p = products.find((x) => x.slug === it.productId);
+  return p ? displayName(p, lang) : it.name;
+};
 
-function TrackView({ fbUser, lang }: { fbUser: User | null; lang: Lang }) {
+function TrackView({ fbUser, products, lang }: { fbUser: User | null; products: Product[]; lang: Lang }) {
   const firestore = getDb();
   const { data: orders, error: ordersError } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
@@ -436,15 +457,21 @@ function TrackView({ fbUser, lang }: { fbUser: User | null; lang: Lang }) {
       {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
       {shown.length === 0 && !ordersError && <p className="muted">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
       {shown.map((o) => {
-        const stageIdx = TRACK_STAGES.indexOf(o.status);
+        const isEnded = o.status === "Cancelled" || o.status === "Refunded";
+        const stageIdx = o.status === "Completed" ? TRACK_STAGES.length - 1 : TRACK_STAGES.indexOf(o.status);
         return (
           <div key={o.id} className="card" style={{ marginTop: 12, padding: 14 }}>
             <div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div>
-            <p className="small muted">{o.status} • {o.paymentMethod} • {o.paymentStatus} • {o.createdAt ? new Date(o.createdAt).toLocaleString("en-GB") : ""}</p>
-            <div className="row" style={{ marginTop: 8 }}>
-              {TRACK_STAGES.map((s, i) => <span key={s} className={`chip ${i <= stageIdx ? "chip-on" : ""}`} style={{ padding: "4px 8px", fontSize: 12 }}>{s}</span>)}
+            <div className="row" style={{ marginTop: 6, alignItems: "center" }}>
+              <span className="chip" style={{ ...statusBadgeStyle(o.status), padding: "4px 10px", fontWeight: 700 }}>{statusLabel(o.status, lang)}</span>
+              <span className="small muted">{o.paymentMethod} • {paymentStatusLabel(o.paymentStatus, lang)} • {o.createdAt ? new Date(o.createdAt).toLocaleString("en-GB") : ""}</span>
             </div>
-            <ul style={{ marginTop: 8, fontSize: 14 }}>{o.items.map((it, i) => <li key={i}>{it.qty} × {it.name}</li>)}</ul>
+            {!isEnded && (
+              <div className="row" style={{ marginTop: 8 }}>
+                {TRACK_STAGES.map((s, i) => <span key={s} className={`chip ${i <= stageIdx ? "chip-on" : ""}`} style={{ padding: "4px 8px", fontSize: 12 }}>{statusLabel(s, lang)}</span>)}
+              </div>
+            )}
+            <ul style={{ marginTop: 8, fontSize: 14 }}>{o.items.map((it, i) => <li key={i}>{it.qty} × {orderItemName(products, it, lang)}</li>)}</ul>
           </div>
         );
       })}
@@ -532,7 +559,7 @@ function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUs
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My orders", "আমার অর্ডারগুলো")}</h3>
       {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
       {orders.length === 0 && !ordersError && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
-      {orders.slice(0, 10).map((o) => <div key={o.id} className="card" style={{ marginTop: 8, padding: 12 }}><div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div><p className="small muted">{o.status} • {o.paymentMethod} • {o.paymentStatus}</p></div>)}
+      {orders.slice(0, 10).map((o) => <div key={o.id} className="card" style={{ marginTop: 8, padding: 12 }}><div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div><p className="small muted"><span className="chip" style={{ ...statusBadgeStyle(o.status), padding: "2px 8px", fontWeight: 700 }}>{statusLabel(o.status, lang)}</span> {o.paymentMethod} • {paymentStatusLabel(o.paymentStatus, lang)}</p></div>)}
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "Favourites", "প্রিয় আইটেম")}</h3>
       {(!userDoc || userDoc.wishlist.length === 0) && <p className="muted small">{tr(lang, "No favourites yet — tap the heart on a product.", "এখনো প্রিয় আইটেম নেই — প্রোডাক্টের হার্ট চাপুন।")}</p>}
       <div className="row">{(userDoc?.wishlist ?? []).map((slug) => { const p = products.find((x) => x.slug === slug); return p ? <span key={slug} className="chip">{displayName(p, lang)}</span> : null; })}</div>
@@ -766,7 +793,7 @@ export function App() {
           </PanelErrorBoundary>
         </main>
       ) : view === "track" ? (
-        <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><TrackView key={fbUser?.uid ?? "guest"} fbUser={fbUser} lang={lang} /></main>
+        <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><TrackView key={fbUser?.uid ?? "guest"} fbUser={fbUser} products={products} lang={lang} /></main>
       ) : view === "reserve" ? (
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><ReserveView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} lang={lang} /></main>
       ) : view === "account" ? (
