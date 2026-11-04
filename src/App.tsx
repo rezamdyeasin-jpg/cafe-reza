@@ -37,6 +37,8 @@ type View = "store" | "track" | "reserve" | "account" | "admin" | "info";
 const tk = (n: number) => `৳${n.toLocaleString("en-US")}`;
 const imgSrc = (key: string | null | undefined) => (key ? `/img/${key}` : "");
 const displayName = (p: Product, lang: Lang) => (lang === "bn" && p.nameBn ? p.nameBn : p.nameEn);
+const taglineText = (settings: Settings, lang: Lang) => (lang === "bn" ? (settings.taglineBn || settings.tagline) : settings.tagline);
+const taglineClass = (lang: Lang) => (lang === "bn" ? "tagline-bn" : "tagline-en");
 const effPrice = (p: Product) => p.discountPrice ?? p.price;
 const orderable = (p: Product) => p.available && effPrice(p) > 0;
 
@@ -110,7 +112,6 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
   const product = slide.product;
   return (
     <div className="card mt-4 overflow-hidden" role="region" aria-label={tr(lang, "Café Reza promos", "ক্যাফে রেজার প্রোমো")}
-      onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}
       onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ touchAction: "pan-y" }}>
       <button type="button" onClick={() => onSelect(product)} className="block w-full text-left" style={{ background: "none", border: "none", padding: 0 }}>
         <div style={{ position: "relative", background: "#0d0906", height: "min(44vw, 200px)", overflow: "hidden" }}>
@@ -588,7 +589,7 @@ function InfoView({ settings, lang }: { settings: Settings; lang: Lang }) {
   return (
     <div>
       <h2 className="serif" style={{ fontSize: 22 }}>{settings.cafeName}</h2>
-      <p className="muted">{settings.tagline}</p>
+      <p className={`muted ${taglineClass(lang)}`} style={{ fontSize: 17 }}>{taglineText(settings, lang)}</p>
       {content.aboutText && <p style={{ marginTop: 8 }}>{content.aboutText}</p>}
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Visit us", "আমাদের ঠিকানা")}</b>
@@ -765,7 +766,7 @@ export function App() {
         <div className="wrap row" style={{ justifyContent: "space-between", paddingTop: 10, paddingBottom: 10 }}>
           <button type="button" onClick={() => { if (view !== "admin") navigate("store"); }} style={{ background: "none", border: "none", display: "flex", gap: 10, alignItems: "center", textAlign: "left", color: "var(--text)", cursor: view === "admin" ? "default" : "pointer" }}>
             <span className="logo-tile" style={{ width: 44, height: 44 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></span>
-            <span><b className="serif" style={{ fontSize: 19 }}>{settings.cafeName}</b><br /><span className="small muted">{settings.tagline}</span></span>
+            <span><b className="serif" style={{ fontSize: 19 }}>{settings.cafeName}</b><br /><span className={`small muted ${taglineClass(lang)}`}>{taglineText(settings, lang)}</span></span>
           </button>
           <div className="row">
             <button className="chip" aria-label="Switch language" onClick={() => setLang(lang === "bn" ? "en" : "bn")}>{lang === "bn" ? "EN" : "বাংলা"}</button>
@@ -814,7 +815,7 @@ export function App() {
               <div style={{ padding: 20 }}>
                 <div className="logo-tile" style={{ width: 88, height: 88 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></div>
                 <h1 className="serif" style={{ fontSize: 32, marginTop: 10 }}>{settings.cafeName}</h1>
-                <p className="muted">{settings.tagline}</p>
+                <p className={`muted ${taglineClass(lang)}`} style={{ fontSize: 20, fontWeight: 700 }}>{taglineText(settings, lang)}</p>
                 <p style={{ marginTop: 8 }}>{tr(lang, "Order from your phone — delivery, takeaway or dine-in. Prices follow the owner's printed menu.", "মোবাইল থেকে অর্ডার করুন — ডেলিভারি, টেকঅ্যাওয়ে বা ডাইন-ইন। দাম মালিকের ছাপা মেনু অনুযায়ী।")}</p>
                 <div className="row" style={{ marginTop: 12 }}>
                   <input aria-label={tr(lang, "Search menu", "মেনু খুঁজুন")} placeholder={tr(lang, "Search the menu…", "মেনু খুঁজুন…")} value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />
@@ -915,7 +916,7 @@ export function App() {
           <span className="logo-tile" style={{ width: 56, height: 56 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></span>
           <div style={{ flex: 1, minWidth: 200 }}>
             <p className="serif" style={{ fontSize: 18, margin: 0 }}>{settings.cafeName}</p>
-            <p className="small muted" style={{ margin: 0 }}>{settings.tagline}</p>
+            <p className={`small muted ${taglineClass(lang)}`} style={{ margin: 0 }}>{taglineText(settings, lang)}</p>
             <p className="small" style={{ margin: "4px 0 0" }}>{settings.address}</p>
             <p className="small" style={{ margin: 0 }}>{tr(lang, "Call:", "কল করুন:")} <a href={`tel:${settings.phone.replace(/[^+\d]/g, "")}`}>{settings.phone}</a> • <a href={settings.facebook} target="_blank" rel="noreferrer">Facebook</a> • <a href={MAPS_LINK} target="_blank" rel="noopener">{tr(lang, "Get Directions", "দিকনির্দেশনা নিন")}</a></p>
           </div>

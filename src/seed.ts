@@ -52,7 +52,8 @@ export const SEED_PRODUCTS: SeedProduct[] = [
 
 export const DEFAULT_SETTINGS = {
   cafeName: "Café Reza",
-  tagline: "On a mission to serve fresh, healthy & tasty food.",
+  tagline: "Dedicated to serving you through fresh, healthy and tasty food",
+  taglineBn: "তাজা, স্বাস্থ্যকর ও সুস্বাদু খাবার পরিবেশনের মাধ্যমে আপনাদের সেবায় নিয়োজিত",
   address: "Dhulipara Chawmuhani, EPZ road, Comilla, Bangladesh",
   phone: "+880 1805-501689",
   email: "",

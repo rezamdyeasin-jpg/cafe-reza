@@ -40,7 +40,7 @@ export type Product = {
   prepTime: number; imageKey: string | null; imageKey2: string | null; ingredients: string; sortOrder: number;
 };
 export type Settings = {
-  cafeName: string; tagline: string; address: string; phone: string; email: string; facebook: string;
+  cafeName: string; tagline: string; taglineBn: string; address: string; phone: string; email: string; facebook: string;
   hours: string; vatPercent: number; deliveryFee: number; freeDeliveryAt: number; minOrder: number;
   bkashNumber: string; nagadNumber: string; rocketNumber: string; paymentNote: string;
   adsJson: string; hoursJson: string; zonesJson: string; paymentsJson: string; contentJson: string;

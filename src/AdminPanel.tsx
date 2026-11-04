@@ -427,6 +427,7 @@ function SettingsTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: 
       <form onSubmit={(e) => void save(e)} className="card" style={{ padding: 14, marginTop: 10 }}>
         <label>{tr(lang, "Cafe name", "ক্যাফের নাম")}<input aria-label="Cafe name" value={f.cafeName} onChange={str("cafeName")} /></label>
         <label>{tr(lang, "Tagline", "ট্যাগলাইন")}<input aria-label="Tagline" value={f.tagline} onChange={str("tagline")} /></label>
+        <label>{tr(lang, "Tagline (Bengali)", "ট্যাগলাইন (বাংলা)")}<input aria-label="Tagline (Bengali)" value={f.taglineBn} onChange={str("taglineBn")} /></label>
         <label>{tr(lang, "Address", "ঠিকানা")}<input aria-label="Address" value={f.address} onChange={str("address")} /></label>
         <label>{tr(lang, "Phone", "ফোন")}<input aria-label="Phone" value={f.phone} onChange={str("phone")} /></label>
         <label>{tr(lang, "Email", "ইমেইল")}<input aria-label="Email" value={f.email} onChange={str("email")} /></label>
