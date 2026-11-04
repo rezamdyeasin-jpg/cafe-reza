@@ -113,10 +113,12 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
       onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}
       onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ touchAction: "pan-y" }}>
       <button type="button" onClick={() => onSelect(product)} className="block w-full text-left" style={{ background: "none", border: "none", padding: 0 }}>
-        <div className="banner-slide relative" style={{ background: "#0d0906", height: "min(44vw, 200px)" }}>
-          <img src={`/img/${slide.img}`} alt={slide.alt} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+        <div style={{ position: "relative", background: "#0d0906", height: "min(44vw, 200px)", overflow: "hidden" }}>
+          {slides.map((s, i) => (
+            <img key={s.slug} src={`/img/${s.img}`} alt={i === idx % slides.length ? s.alt : ""} aria-hidden={i !== idx % slides.length} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", display: "block", opacity: i === idx % slides.length ? 1 : 0, transition: reduced ? "none" : "opacity 0.8s ease" }} />
+          ))}
         </div>
-        <div className="flex items-center justify-between px-3 py-2" style={{ background: "rgba(22,15,12,.72)", color: "#f5ebdd", gap: 8, flexWrap: "nowrap", height: 40 }}>
+        <div key={slide.slug} className="flex items-center justify-between px-3 py-2 banner-caption-in" style={{ background: "rgba(22,15,12,.72)", color: "#f5ebdd", gap: 8, flexWrap: "nowrap", height: 40 }}>
           <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{displayName(product, lang)}</b><span style={{ flex: "none" }}>{orderable(product) ? tk(effPrice(product)) : tr(lang, "Price coming soon", "দাম আসছে")}</span>
         </div>
       </button>
@@ -129,8 +131,10 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
 }
 
 function PromoVideo({ src, label, poster, lang }: { src: string | null; label: string; poster?: string; lang: Lang }) {
-  if (!src) return poster ? <img src={poster} alt={label} style={{ width: "100%", height: 224, objectFit: "cover", display: "block" }} /> : null;
-  return <video src={src} poster={poster} autoPlay muted loop playsInline disablePictureInPicture preload="auto" aria-label={label} style={{ width: "100%", height: 280, objectFit: "cover", display: "block", background: "#000", pointerEvents: "none" }} />;
+  // Big hero video: taller than before with rounded corners, so it reads
+  // as the page's main visual. Still silent autoplay loop, no controls.
+  if (!src) return poster ? <img src={poster} alt={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000" }} /> : null;
+  return <video src={src} poster={poster} autoPlay muted loop playsInline disablePictureInPicture preload="auto" aria-label={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000", pointerEvents: "none" }} />;
 }
 
 function promoSrc(choice: string | undefined): string | null {

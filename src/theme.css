@@ -36,8 +36,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 @media (min-width: 1024px) { .products { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-.banner-slide { transition: opacity 1.1s ease, transform 1.1s ease; will-change: opacity, transform; }
-@media (prefers-reduced-motion: reduce) { .banner-slide { transition: none; } }
+@keyframes banner-caption-in { from { opacity: 0; } to { opacity: 1; } }
+.banner-caption-in { animation: banner-caption-in 0.8s ease; }
+@media (prefers-reduced-motion: reduce) { .banner-caption-in { animation: none; } }
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: flex-end; justify-content: center; z-index: 50; padding: 12px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
 @media (min-width: 720px) { .modal-backdrop { align-items: center; } }
 .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; width: 100%; max-width: 560px; max-height: 88vh; overflow: auto; padding: 16px; }
