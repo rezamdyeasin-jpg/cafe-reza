@@ -443,7 +443,7 @@ const orderItemName = (products: Product[], it: { productId: string; name: strin
 
 function TrackView({ fbUser, products, lang }: { fbUser: User | null; products: Product[]; lang: Lang }) {
   const firestore = getDb();
-  const { data: orders, error: ordersError } = useLive<Order>(
+  const { data: orders, loading: ordersLoading, error: ordersError } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
     orderFromDoc,
   );
@@ -455,7 +455,9 @@ function TrackView({ fbUser, products, lang }: { fbUser: User | null; products: 
       <h2 className="serif" style={{ fontSize: 22 }}>{tr(lang, "Track your order", "অর্ডার ট্র্যাক করুন")}</h2>
       <label>{tr(lang, "Search by order number", "অর্ডার নম্বর দিয়ে খুঁজুন")}<input aria-label="Search by order number" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="CR-XXXXXX" /></label>
       {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
-      {shown.length === 0 && !ordersError && <p className="muted">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
+      {ordersLoading && !ordersError && <p className="muted">{tr(lang, "Loading your orders…", "অর্ডারগুলো লোড হচ্ছে…")}</p>}
+      {!ordersLoading && orders.length === 0 && !ordersError && <p className="muted">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
+      {!ordersLoading && orders.length > 0 && shown.length === 0 && <p className="muted">{tr(lang, "No order matches this number.", "এই নম্বরের কোনো অর্ডার পাওয়া যায়নি।")}</p>}
       {shown.map((o) => {
         const isEnded = o.status === "Cancelled" || o.status === "Refunded";
         const stageIdx = o.status === "Completed" ? TRACK_STAGES.length - 1 : TRACK_STAGES.indexOf(o.status);
@@ -481,7 +483,7 @@ function TrackView({ fbUser, products, lang }: { fbUser: User | null; products: 
 
 function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: UserDoc | null; lang: Lang }) {
   const firestore = getDb();
-  const { data: mine, error: mineError } = useLive<Reservation>(
+  const { data: mine, loading: mineLoading, error: mineError } = useLive<Reservation>(
     () => (firestore && fbUser ? query(collection(firestore, "reservations"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
     (id, d) => ({ id, name: String(d.name ?? ""), phone: String(d.phone ?? ""), email: String(d.email ?? ""), date: String(d.date ?? ""), time: String(d.time ?? ""), guests: Number(d.guests ?? 2), requests: String(d.requests ?? ""), status: String(d.status ?? "Pending"), tableLabel: String(d.tableLabel ?? ""), userId: String(d.userId ?? ""), createdAt: "" }),
   );
@@ -525,7 +527,8 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
       </form>
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My reservations", "আমার রিজার্ভেশনগুলো")}</h3>
       {mineError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your reservations. Please try again.", "আপনার রিজার্ভেশনগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
-      {mine.length === 0 && !mineError && <p className="muted small">{tr(lang, "No reservations yet.", "এখনো কোনো রিজার্ভেশন নেই।")}</p>}
+      {mineLoading && !mineError && <p className="muted small">{tr(lang, "Loading your reservations…", "রিজার্ভেশনগুলো লোড হচ্ছে…")}</p>}
+      {!mineLoading && mine.length === 0 && !mineError && <p className="muted small">{tr(lang, "No reservations yet.", "এখনো কোনো রিজার্ভেশন নেই।")}</p>}
       {mine.map((r) => <div key={r.id} className="card" style={{ marginTop: 8, padding: 12 }}><b>{r.date} {r.time}</b> • {r.guests} {tr(lang, "guests", "অতিথি")} • <span className="chip">{r.status}</span><p className="small muted">{tr(lang, "Table:", "টেবিল:")} {r.tableLabel || tr(lang, "To be assigned", "পরে জানানো হবে")}</p></div>)}
     </div>
   );
@@ -533,7 +536,7 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
 
 function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; lang: Lang; onLoginSuccess: () => void }) {
   const firestore = getDb();
-  const { data: orders, error: ordersError } = useLive<Order>(
+  const { data: orders, loading: ordersLoading, error: ordersError } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
     orderFromDoc,
   );
@@ -558,7 +561,8 @@ function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUs
       </div>
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My orders", "আমার অর্ডারগুলো")}</h3>
       {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
-      {orders.length === 0 && !ordersError && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
+      {ordersLoading && !ordersError && <p className="muted small">{tr(lang, "Loading your orders…", "অর্ডারগুলো লোড হচ্ছে…")}</p>}
+      {!ordersLoading && orders.length === 0 && !ordersError && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
       {orders.slice(0, 10).map((o) => <div key={o.id} className="card" style={{ marginTop: 8, padding: 12 }}><div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div><p className="small muted"><span className="chip" style={{ ...statusBadgeStyle(o.status), padding: "2px 8px", fontWeight: 700 }}>{statusLabel(o.status, lang)}</span> {o.paymentMethod} • {paymentStatusLabel(o.paymentStatus, lang)}</p></div>)}
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "Favourites", "প্রিয় আইটেম")}</h3>
       {(!userDoc || userDoc.wishlist.length === 0) && <p className="muted small">{tr(lang, "No favourites yet — tap the heart on a product.", "এখনো প্রিয় আইটেম নেই — প্রোডাক্টের হার্ট চাপুন।")}</p>}
