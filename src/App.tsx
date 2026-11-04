@@ -722,24 +722,28 @@ export function App() {
           <div style={{ fontSize: 24, fontWeight: 600 }}>{tr(lang, "Login successful!", "লগইন সফল হয়েছে!")}</div>
         </div>
       )}
+      {/* The customer header/nav never shows inside the admin panel: its
+          Menu / Track / Account buttons navigate away from #/admin, which
+          is why tapping Menu threw the owner out of the admin panel. The
+          admin panel has its own header, tabs and back button. */}
       <header className="topbar no-print">
         <div className="wrap row" style={{ justifyContent: "space-between", paddingTop: 10, paddingBottom: 10 }}>
-          <button type="button" onClick={() => navigate("store")} style={{ background: "none", border: "none", display: "flex", gap: 10, alignItems: "center", textAlign: "left", color: "var(--text)" }}>
+          <button type="button" onClick={() => { if (view !== "admin") navigate("store"); }} style={{ background: "none", border: "none", display: "flex", gap: 10, alignItems: "center", textAlign: "left", color: "var(--text)", cursor: view === "admin" ? "default" : "pointer" }}>
             <span className="logo-tile" style={{ width: 44, height: 44 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></span>
             <span><b className="serif" style={{ fontSize: 19 }}>{settings.cafeName}</b><br /><span className="small muted">{settings.tagline}</span></span>
           </button>
           <div className="row">
             <button className="chip" aria-label="Switch language" onClick={() => setLang(lang === "bn" ? "en" : "bn")}>{lang === "bn" ? "EN" : "বাংলা"}</button>
             <button className="chip" aria-label="Toggle theme" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? "☀" : "☾"}</button>
-            <button className="chip" aria-label={`Cart, ${cartCount} items`} onClick={() => setCartOpen(true)}>🛒 {cartCount}</button>
-            <button className="chip" onClick={() => navigate("account")} style={{ maxWidth: 150, minWidth: 118, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "none" }}>{fbUser ? (userDoc?.name ?? tr(lang, "Account", "অ্যাকাউন্ট")) : tr(lang, "Sign in", "সাইন-ইন")}</button>
+            {view !== "admin" && <button className="chip" aria-label={`Cart, ${cartCount} items`} onClick={() => setCartOpen(true)}>🛒 {cartCount}</button>}
+            {view !== "admin" && <button className="chip" onClick={() => navigate("account")} style={{ maxWidth: 150, minWidth: 118, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "none" }}>{fbUser ? (userDoc?.name ?? tr(lang, "Account", "অ্যাকাউন্ট")) : tr(lang, "Sign in", "সাইন-ইন")}</button>}
           </div>
         </div>
-        <nav className="wrap row" style={{ paddingBottom: 8 }} aria-label="Main">
+        {view !== "admin" && (<nav className="wrap row" style={{ paddingBottom: 8 }} aria-label="Main">
           {([["store", tr(lang, "Menu", "মেনু")], ["track", tr(lang, "Track", "ট্র্যাক")], ["reserve", tr(lang, "Reserve", "রিজার্ভ")], ["info", tr(lang, "About", "সম্পর্কে")], ["account", tr(lang, "Account", "অ্যাকাউন্ট")]] as Array<[View, string]>).map(([v, label]) => (
             <button key={v} className={`chip ${view === v ? "chip-on" : ""}`} onClick={() => navigate(v)}>{label}</button>
           ))}
-        </nav>
+        </nav>)}
       </header>
 
       {showSetupNotice && (
@@ -871,7 +875,7 @@ export function App() {
       )}
       <CartDrawer open={cartOpen} onClose={() => setCartOpen(false)} cart={cart} setCart={setCart} products={products} settings={settings} fbUser={fbUser} userDoc={userDoc} lang={lang} />
 
-      <footer className="wrap" style={{ marginTop: 28 }}>
+      {view !== "admin" && (<footer className="wrap" style={{ marginTop: 28 }}>
         <div className="card" style={{ padding: 16, display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
           <span className="logo-tile" style={{ width: 56, height: 56 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></span>
           <div style={{ flex: 1, minWidth: 200 }}>
@@ -882,14 +886,14 @@ export function App() {
           </div>
         </div>
         <p className="small muted text-center" style={{ marginTop: 10 }}>BDT (৳) • Asia/Dhaka • {tr(lang, "Mobile payments stay “Pending verification” until verified.", "মোবাইল পেমেন্ট যাচাই না করা পর্যন্ত “যাচাইয়ের অপেক্ষায়” থাকে।")}</p>
-      </footer>
+      </footer>)}
 
-      <nav className="bottomnav no-print" aria-label="Mobile">
+      {view !== "admin" && (<nav className="bottomnav no-print" aria-label="Mobile">
         <button onClick={() => navigate("store")}>🏠 {tr(lang, "Menu", "মেনু")}</button>
         <button onClick={() => setCartOpen(true)}>🛒 {tr(lang, "Cart", "কার্ট")} ({cartCount})</button>
         <button onClick={() => navigate("track")}>📦 {tr(lang, "Track", "ট্র্যাক")}</button>
         <button onClick={() => navigate("account")}>👤 {tr(lang, "Account", "অ্যাকাউন্ট")}</button>
-      </nav>
+      </nav>)}
       {cart.length > 0 && view === "store" && !cartOpen && (
         <button className="btn-gold no-print" style={{ position: "fixed", right: 16, bottom: 76, zIndex: 40, boxShadow: "0 8px 20px rgba(0,0,0,.35)" }} onClick={() => setCartOpen(true)}>{tr(lang, "View cart", "কার্ট দেখুন")} • {tk(cart.reduce((a, c) => { const p = products.find((x) => x.slug === c.productId); return a + (p ? effPrice(p) * c.qty : 0); }, 0))} ({cartCount})</button>
       )}
