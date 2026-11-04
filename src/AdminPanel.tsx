@@ -12,7 +12,7 @@ import {
   addDoc, collection, deleteDoc, doc, limit, orderBy, query,
   serverTimestamp, setDoc, updateDoc,
 } from "firebase/firestore";
-import { getDb, probeFirestore } from "./firebase";
+import { getDb, probeFirestore, signOutUser } from "./firebase";
 import { BANNER_SLIDES, CUSTOMER_EMAIL, OWNER_EMAIL, SEED_PRODUCTS } from "./seed";
 import {
   AD_SLOT_DEFS, expenseFromDoc, isStaffRole, orderFromDoc, ORDER_STATUSES, parseAds, parseBannerSelection, parseContent,
@@ -929,6 +929,7 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
 }) {
   const [tab, setTab] = useState("dashboard");
   const [showAlerts, setShowAlerts] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
   const firestore = getDb();
   // The panel mounts while the user doc is still loading (fresh sign-in),
   // so these queries must re-subscribe once staff is known — the old
@@ -979,9 +980,12 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
   return (
     <div className="admin-shell">
       <nav className="admin-nav" aria-label="Admin">
+        <div className="row">
+          <button className="chip" onClick={() => { setShowMenu(!showMenu); setShowAlerts(false); }}>☰ {tr(lang, "Menu", "মেনু")}</button>
+          <button className="chip" onClick={() => { setShowAlerts(!showAlerts); setShowMenu(false); }}>🔔 {tr(lang, "Alerts", "সতর্কতা")}{alertTotal > 0 ? ` (${alertTotal})` : ""}</button>
+        </div>
         <p className="serif" style={{ fontSize: 18, margin: 0 }}>{tr(lang, "Admin panel", "অ্যাডমিন প্যানেল")}</p>
         <p className="small muted" style={{ margin: 0 }}>{userDoc.name} • {owner ? tr(lang, "Super Admin (Owner)", "সুপার অ্যাডমিন (মালিক)") : userDoc.role}</p>
-        <button className="chip" onClick={() => setShowAlerts(!showAlerts)}>🔔 {tr(lang, "Alerts", "সতর্কতা")}{alertTotal > 0 ? ` (${alertTotal})` : ""}</button>
         {showAlerts && (
           <div className="card" style={{ padding: 10, marginTop: 6 }}>
             {alertTotal === 0 ? <p className="small muted" style={{ margin: 0 }}>{tr(lang, "No alerts — everything is fine.", "কোনো সতর্কতা নেই — সব ঠিক আছে।")}</p> : <>
@@ -990,6 +994,17 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
               <p className="small" style={{ margin: 0 }}>• {lowInvCount} {tr(lang, "low-stock ingredients", "টি কম স্টকের উপকরণ")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("inventory"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
               <p className="small" style={{ margin: 0 }}>• {lowStock.length} {tr(lang, "low-stock products", "টি কম স্টকের প্রোডাক্ট")} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { setTab("products"); setShowAlerts(false); }}>{tr(lang, "View", "দেখুন")}</button></p>
             </>}
+          </div>
+        )}
+        {showMenu && (
+          <div className="card" style={{ padding: 10, marginTop: 6 }}>
+            {visibleTabs.map((t) => (
+              <button key={t.id} className={`chip ${activeTab === t.id ? "chip-on" : ""}`} style={{ display: "block", width: "100%", marginTop: 4, textAlign: "left" }} onClick={() => { setTab(t.id); setShowMenu(false); }}>{lang === "bn" ? t.bn : t.en}</button>
+            ))}
+            <div style={{ borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 8 }}>
+              <button className="btn-gold" style={{ display: "block", width: "100%" }} onClick={onBack}>🛍️ {tr(lang, "Go to shop", "দোকানে যান")}</button>
+              <button className="btn-ghost" style={{ display: "block", width: "100%", marginTop: 6 }} onClick={() => void signOutUser()}>{tr(lang, "Sign out", "সাইন-আউট")}</button>
+            </div>
           </div>
         )}
         {visibleTabs.map((t) => <button key={t.id} className={`chip ${activeTab === t.id ? "chip-on" : ""}`} onClick={() => setTab(t.id)}>{lang === "bn" ? t.bn : t.en}</button>)}
