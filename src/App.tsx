@@ -498,6 +498,15 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!fbUser) { setErr(tr(lang, "Sign in first — orders need a signed-in account (Google, Facebook or phone).", "আগে সাইন-ইন করুন — অর্ডারের জন্য সাইন-ইন করা অ্যাকাউন্ট লাগবে (Google, Facebook বা ফোন)।")); return; }
+    // A coupon that was already checked and rejected must not be
+    // submitted — the order would fail in the transaction and the
+    // customer would only see a spinner that reverts with no clear
+    // reason. Show the coupon's own message here instead, so they
+    // know to remove or change the code before ordering.
+    if (coupon.trim() && couponInfo.status === "error") {
+      setErr(couponInfo.note || tr(lang, "The coupon code is not valid — remove it or check it again before ordering.", "কুপন কোডটি ঠিক নয় — অর্ডারের আগে সেটি সরান বা আবার যাচাই করুন।"));
+      return;
+    }
     setErr(""); setBusy(true);
     const r = await placeOrderTx({
       uid: fbUser.uid, customerName: name.trim(), phone: phone.trim(), address: address.trim(),
