@@ -930,6 +930,10 @@ export function AdminPanel({ fbUser, userDoc, settings, categories, products, la
   const [tab, setTab] = useState("dashboard");
   const [showAlerts, setShowAlerts] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  // Choosing any section closes the menu, however it was chosen (menu
+  // item, tab chip or alert shortcut) — the menu must never stay open
+  // after navigating to a section.
+  useEffect(() => { setShowMenu(false); }, [tab]);
   const firestore = getDb();
   // The panel mounts while the user doc is still loading (fresh sign-in),
   // so these queries must re-subscribe once staff is known — the old
