@@ -894,6 +894,9 @@ export function App() {
         <button onClick={() => navigate("track")}>📦 {tr(lang, "Track", "ট্র্যাক")}</button>
         <button onClick={() => navigate("account")}>👤 {tr(lang, "Account", "অ্যাকাউন্ট")}</button>
       </nav>)}
+      {isStaff && view !== "admin" && (
+        <button className="btn-gold no-print" style={{ position: "fixed", left: 16, bottom: 76, zIndex: 40, boxShadow: "0 8px 20px rgba(0,0,0,.35)", padding: "10px 14px" }} onClick={() => navigate("admin")}>← {tr(lang, "Admin panel", "অ্যাডমিন প্যানেল")}</button>
+      )}
       {cart.length > 0 && view === "store" && !cartOpen && (
         <button className="btn-gold no-print" style={{ position: "fixed", right: 16, bottom: 76, zIndex: 40, boxShadow: "0 8px 20px rgba(0,0,0,.35)" }} onClick={() => setCartOpen(true)}>{tr(lang, "View cart", "কার্ট দেখুন")} • {tk(cart.reduce((a, c) => { const p = products.find((x) => x.slug === c.productId); return a + (p ? effPrice(p) * c.qty : 0); }, 0))} ({cartCount})</button>
       )}

@@ -4,7 +4,14 @@
 // totals), and loyalty points are credited in the same transaction.
 // Staff must still verify totals/payment before confirming an order:
 // without a Cloud Function there is no server-side recomputation.
-import { collection, doc, runTransaction, serverTimestamp } from "firebase/firestore";
+//
+// Firestore transactions require ALL reads before ANY write: a read
+// after a write fails with "Firestore transactions require all reads
+// to be executed before all writes." So this transaction reads
+// everything first (products, coupon, user) and only then writes
+// (stock, coupon count, order, loyalty). That ordering is the whole
+// fix for website orders failing at checkout.
+import { collection, doc, runTransaction, serverTimestamp, type DocumentReference } from "firebase/firestore";
 import { getDb } from "./firebase";
 import type { OrderItem, Product, Settings } from "./db";
 
@@ -39,8 +46,13 @@ export async function placeOrderTx(args: {
   if (args.lines.length === 0) return { ok: false, error: "The cart is empty." };
   try {
     const orderNo = await runTransaction(firestore, async (tx) => {
+      const isPos = args.source === "pos";
+      const code = args.couponCode.trim().toUpperCase();
+
+      // ---- Reads: products (price, availability, stock) ----
+      type ReadLine = { line: CartLine; ref: DocumentReference; price: number; stock: number };
+      const readLines: ReadLine[] = [];
       let subtotal = 0;
-      const items: OrderItem[] = [];
       for (const line of args.lines) {
         const ref = doc(firestore, "products", line.product.slug);
         const snap = await tx.get(ref);
@@ -50,14 +62,16 @@ export async function placeOrderTx(args: {
         if (!data.available || price <= 0) throw new Error(`${line.product.nameEn} is not available right now.`);
         const stock = Number(data.stock ?? 0);
         if (stock < line.qty) throw new Error(`Not enough stock for ${line.product.nameEn}. Only ${stock} left.`);
-        tx.update(ref, { stock: stock - line.qty });
+        readLines.push({ line, ref, price, stock });
         subtotal += price * line.qty;
-        items.push({ productId: line.product.slug, name: line.product.nameEn, qty: line.qty, price, size: line.size, note: line.note });
       }
+
+      // ---- Read: coupon ----
       let discount = 0;
-      const code = args.couponCode.trim().toUpperCase();
+      let couponRef: DocumentReference | null = null;
+      let couponUsed = 0;
       if (code) {
-        const couponRef = doc(firestore, "coupons", code);
+        couponRef = doc(firestore, "coupons", code);
         const couponSnap = await tx.get(couponRef);
         if (!couponSnap.exists()) throw new Error("Coupon code not found.");
         const c = couponSnap.data() as { active?: boolean; kind?: string; value?: number; minPurchase?: number; maxDiscount?: number | null; usageLimit?: number | null; usedCount?: number; expiresAt?: string };
@@ -68,15 +82,33 @@ export async function placeOrderTx(args: {
         discount = c.kind === "percent" ? Math.round((subtotal * Number(c.value ?? 0)) / 100) : Number(c.value ?? 0);
         if (c.maxDiscount != null) discount = Math.min(discount, Number(c.maxDiscount));
         discount = Math.min(discount, subtotal);
-        tx.update(couponRef, { usedCount: Number(c.usedCount ?? 0) + 1 });
+        couponUsed = Number(c.usedCount ?? 0) + 1;
       }
+
       const { vat, deliveryFee, total } = calcTotals(subtotal, discount, args.settings.vatPercent, args.orderType, args.settings.deliveryFee, args.settings.freeDeliveryAt);
       if (args.settings.minOrder > 0 && total < args.settings.minOrder && args.source === "website") {
         throw new Error(`Minimum order is ৳${args.settings.minOrder}.`);
       }
+
+      // ---- Read: loyalty user (website orders only) ----
+      let loyalty: { ref: DocumentReference; points: number; tier: string } | null = null;
+      if (!isPos && args.settings.loyaltyPerAmount > 0) {
+        const userRef = doc(firestore, "users", args.uid);
+        const userSnap = await tx.get(userRef);
+        if (userSnap.exists()) {
+          const points = Math.floor(total / args.settings.loyaltyPerAmount);
+          const current = Number((userSnap.data() as { loyaltyPoints?: number }).loyaltyPoints ?? 0);
+          const next = current + points;
+          loyalty = { ref: userRef, points: next, tier: next >= 1000 ? "Gold" : next >= 500 ? "Silver" : "Bronze" };
+        }
+      }
+
+      // ---- Writes (only after every read above) ----
+      for (const r of readLines) tx.update(r.ref, { stock: r.stock - r.line.qty });
+      if (couponRef) tx.update(couponRef, { usedCount: couponUsed });
       const orderRef = doc(collection(firestore, "orders"));
       const no = `CR-${orderRef.id.slice(0, 6).toUpperCase()}`;
-      const isPos = args.source === "pos";
+      const items: OrderItem[] = readLines.map((r) => ({ productId: r.line.product.slug, name: r.line.product.nameEn, qty: r.line.qty, price: r.price, size: r.line.size, note: r.line.note }));
       tx.set(orderRef, {
         orderNo: no, userId: args.uid, customerName: args.customerName, phone: args.phone, address: args.address,
         orderType: args.orderType, source: args.source, status: isPos ? "Completed" : "Pending",
@@ -87,16 +119,7 @@ export async function placeOrderTx(args: {
         items, couponCode: code, createdAt: serverTimestamp(),
       });
       // Loyalty: 1 point per `loyaltyPerAmount` spent (website orders).
-      if (!isPos && args.settings.loyaltyPerAmount > 0) {
-        const userRef = doc(firestore, "users", args.uid);
-        const userSnap = await tx.get(userRef);
-        if (userSnap.exists()) {
-          const points = Math.floor(total / args.settings.loyaltyPerAmount);
-          const current = Number((userSnap.data() as { loyaltyPoints?: number }).loyaltyPoints ?? 0);
-          const next = current + points;
-          tx.update(userRef, { loyaltyPoints: next, tier: next >= 1000 ? "Gold" : next >= 500 ? "Silver" : "Bronze" });
-        }
-      }
+      if (loyalty) tx.update(loyalty.ref, { loyaltyPoints: loyalty.points, tier: loyalty.tier });
       return no;
     });
     return { ok: true, orderNo };
