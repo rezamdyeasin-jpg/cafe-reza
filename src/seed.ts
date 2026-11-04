@@ -1,7 +1,9 @@
 // Seed catalog for the standalone Firebase build.
 // Source of truth: the Cafe Reza menu in the Hatch artifact's
 // server/src/actions.ts (SEED_CATS / SEED_PRODUCTS), copied
-// exactly — same 9 categories, same 34 products, same prices.
+// exactly — same 9 categories, same prices. 26 products: the printed
+// menu's 25, with Horlicks Tea as two options (small ৳30 / large ৳50)
+// because the printed menu shows 30/50.
 // Prices of 0 mean "price not set by the owner yet": those items
 // stay hidden/unorderable until an admin sets a price in the
 // admin panel. This file only WRITES these documents the first
@@ -20,6 +22,15 @@ export const SEED_CATEGORIES: Array<{ id: string; nameEn: string; nameBn: string
   { id: "fast-food", nameEn: "Fast Food", nameBn: "ফাস্ট ফুড", sortOrder: 7, active: true },
   { id: "tea", nameEn: "Tea", nameBn: "চা", sortOrder: 8, active: true },
   { id: "mocktails", nameEn: "Mocktails", nameBn: "মকটেল", sortOrder: 9, active: true },
+];
+
+export type SeedCoupon = { code: string; kind: string; value: number; minPurchase: number; maxDiscount: number | null; usageLimit: number | null; active: boolean; expiresAt: string; description: string; firstOrderOnly: boolean };
+
+// First-order welcome coupon: 10% off, only on a customer's very
+// first order. Seeded like the products — only when the coupon does
+// not already exist, so an admin-edited coupon is never overwritten.
+export const SEED_COUPONS: SeedCoupon[] = [
+  { code: "WELCOME10", kind: "percent", value: 10, minPurchase: 0, maxDiscount: null, usageLimit: null, active: true, expiresAt: "", description: "First order — 10% off", firstOrderOnly: true },
 ];
 
 export const SEED_PRODUCTS: SeedProduct[] = [
@@ -43,7 +54,8 @@ export const SEED_PRODUCTS: SeedProduct[] = [
   { slug: "malai-tea", en: "Malai Tea", bn: "মালাই চা", categoryId: "tea", price: 50, img: "poster-malai.jpg", img2: "poster-malai.jpg", ing: "Tea, Milk, Malai, Sugar", feat: false, best: false, isNew: false, avail: true, desc: "Rich malai tea." },
   { slug: "energy-booster", en: "Energy Booster", bn: "এনার্জি বুস্টার", categoryId: "fresh-juice", price: 100, img: "poster-energy.jpg", img2: "poster-energy-detail.jpg", ing: "Banana, Dates, Honey, Almonds, Raisins, Cashews, Milk", feat: false, best: false, isNew: true, avail: true, desc: "Our energy booster drink." },
   { slug: "yogurd-lacchi", en: "Yogurt Lassi", bn: "দইয়ের লাচ্ছি", categoryId: "smoothies", price: 60, img: "poster-lacchi.jpg", img2: "tray.jpg", ing: "Yoghurt, Milk, Sugar, Ice", feat: false, best: false, isNew: false, avail: true, desc: "Chilled yogurt lassi." },
-  { slug: "horlicks-tea", en: "Horlicks Tea", bn: "হরলিক্স চা", categoryId: "tea", price: 30, img: "main-horlicks-tea.png", img2: "main-horlicks-tea.png", ing: "Horlicks, Milk, Tea", feat: false, best: false, isNew: false, avail: true, desc: "Horlicks tea with milk." },
+  { slug: "horlicks-tea-small", en: "Horlicks Tea (Small)", bn: "হরলিক্স চা (ছোট)", categoryId: "tea", price: 30, img: "main-horlicks-tea.png", img2: "main-horlicks-tea.png", ing: "Horlicks, Milk, Tea", feat: false, best: false, isNew: false, avail: true, desc: "Horlicks tea with milk, small." },
+  { slug: "horlicks-tea-large", en: "Horlicks Tea (Large)", bn: "হরলিক্স চা (বড়)", categoryId: "tea", price: 50, img: "main-horlicks-tea.png", img2: "main-horlicks-tea.png", ing: "Horlicks, Milk, Tea", feat: false, best: false, isNew: false, avail: true, desc: "Horlicks tea with milk, large." },
   { slug: "edible-cup-tea", en: "Edible Cup Tea", bn: "এডিবল কাপ চা", categoryId: "tea", price: 50, img: "main-edible-cup-tea.png", img2: "main-edible-cup-tea.png", ing: "Tea, Milk, Edible cup", feat: false, best: false, isNew: false, avail: true, desc: "Tea served in an edible cup." },
   { slug: "cold-tea", en: "Cold Tea", bn: "কোল্ড চা", categoryId: "cold-coffee", price: 80, img: "poster-cold-tea.jpg", img2: "poster-cold-tea.jpg", ing: "Tea, Ice, Water, Sugar", feat: false, best: false, isNew: false, avail: true, desc: "Chilled cold tea." },
   { slug: "iced-mint-lemonade-half", en: "Iced Mint Lemonade (Half)", bn: "আইসড মিন্ট লেমনেড (হাফ)", categoryId: "fresh-juice", price: 60, img: "poster-lemonade-half.jpg", img2: "poster-lemonade-half.jpg", ing: "Mint, Lemon, Ice, Sugar, Water", feat: false, best: false, isNew: true, avail: true, desc: "Iced mint lemonade, half size." },
@@ -76,7 +88,19 @@ export const DEFAULT_SETTINGS = {
   bannersJson: "[]",
   loyaltyPerAmount: 100,
   loyaltyRedeemPoints: 100,
-  loyaltyRedeemValue: 20,
+  loyaltyRedeemValue: 10,
+  // Offer controls (owner's decisions — changeable in Admin → Settings):
+  // combo: 4+ of one item → ৳10 off; happy hour 16:00–18:00 → 2% off;
+  // a customer may cancel an order only within 2 minutes of placing it.
+  comboMinQty: 4,
+  comboDiscount: 10,
+  happyHourStart: "16:00",
+  happyHourEnd: "18:00",
+  happyHourPercent: 2,
+  cancelWindowMinutes: 2,
+  riskCautionPct: 25,
+  riskRiskyPct: 50,
+  geminiApiKey: "",
 };
 
 export const BANNER_SLIDES: Array<{ slug: string; img: string; alt: string }> = [

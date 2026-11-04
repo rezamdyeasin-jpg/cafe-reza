@@ -9,7 +9,7 @@
 import { Component, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { User } from "firebase/auth";
 import {
-  addDoc, collection, doc, getFirestore, onSnapshot, orderBy, query, serverTimestamp,
+  addDoc, collection, doc, getDoc, getDocs, getFirestore, limit, onSnapshot, orderBy, query, serverTimestamp,
   updateDoc, where, type DocumentData,
 } from "firebase/firestore";
 import {
@@ -22,12 +22,14 @@ import {
 } from "./seed";
 import {
   AD_SLOT_DEFS, enabledPayments, isStaffRole, orderFromDoc, parseAds, parseBannerSelection,
-  parseContent, productFromDoc, categoryFromDoc, seedCatalog, settingsFromDoc, tr,
+  parseContent, productFromDoc, categoryFromDoc, seedCatalog, settingsFromDoc, tr, tsToIso,
   useCatalog, useLive, useLiveDoc, useSettingsDoc, userFromDoc,
   type Category, type Coupon, type Lang, type Order, type Product, type Reservation,
   type Settings, type UserDoc,
 } from "./db";
-import { placeOrderTx, type CartLine } from "./orders";
+import { cancelOrderTx, COMBO_DISCOUNT_PER_LINE, COMBO_MIN_QTY, comboDiscount, HAPPY_HOUR_END, HAPPY_HOUR_PERCENT, HAPPY_HOUR_START, happyHourDiscount, isHappyHour, placeOrderTx, timeToMin, type CartLine } from "./orders";
+import { askAi, buildAiKnowledge } from "./aiAssistant";
+import { ReceiptModal } from "./Receipt";
 import { InstallAppCard } from "./InstallAppCard";
 import { AdminPanel } from "./AdminPanel";
 
@@ -45,6 +47,58 @@ const taglineClass = (lang: Lang) => (lang === "bn" ? "tagline-bn" : "tagline-en
 const isInAppBrowser = () => typeof navigator !== "undefined" && /FBAN|FBAV|Instagram/i.test(navigator.userAgent);
 const effPrice = (p: Product) => p.discountPrice ?? p.price;
 const orderable = (p: Product) => p.available && effPrice(p) > 0;
+
+// Opening hours (settings.hoursJson: [{day, open, close}]) → is the
+// cafe open right now? "00:00" as a closing time means midnight at
+// the end of the day, so it reads as 24:00.
+type DayHours = { day: string; open: string; close: string; closed?: boolean };
+function parseHours(json?: string | null): DayHours[] {
+  try {
+    const raw = JSON.parse(json ?? "") as unknown;
+    return Array.isArray(raw) ? (raw as DayHours[]) : [];
+  } catch { return []; }
+}
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+function todayHours(json?: string | null, now = new Date()): DayHours | null {
+  const dayName = DAY_NAMES[now.getDay()] ?? "";
+  return parseHours(json).find((h) => h.day === dayName) ?? null;
+}
+function isOpenNow(json?: string | null, now = new Date()): boolean {
+  const t = todayHours(json, now);
+  if (!t || t.closed) return false;
+  const toMin = (s: string) => { const [h, m] = s.split(":").map(Number); return (h ?? 0) * 60 + (m ?? 0); };
+  const open = toMin(t.open);
+  let close = toMin(t.close);
+  if (close === 0) close = 24 * 60;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  return cur >= open && cur < close;
+}
+// Live open/closed badge: re-checks every 30 seconds, so the badge
+// flips on its own when the cafe opens or closes.
+function OpenNowBadge({ settings, lang }: { settings: Settings; lang: Lang }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((t) => t + 1), 30000);
+    return () => window.clearInterval(id);
+  }, []);
+  const open = isOpenNow(settings.hoursJson);
+  const t = todayHours(settings.hoursJson);
+  if (!t) {
+    // No hours are configured at all: do not claim the cafe is
+    // closed — just point to the hours.
+    return (
+      <span className="chip" style={{ background: "var(--gold)", color: "#1a1207", fontWeight: 800, borderColor: "transparent", padding: "6px 12px" }}>
+        {tr(lang, "Opening hours — see About", "খোলার সময় — সম্পর্কে দেখুন")}
+      </span>
+    );
+  }
+  const hoursText = !t.closed ? `${t.open} – ${t.close}` : "";
+  return (
+    <span className="chip" style={{ background: open ? "var(--good)" : "var(--bad)", color: "#fff", fontWeight: 800, borderColor: "transparent", padding: "6px 12px" }}>
+      {open ? `● ${tr(lang, "Open now", "এখন খোলা")}` : `● ${tr(lang, "Closed", "বন্ধ")}`}{hoursText ? ` • ${hoursText}` : ""}
+    </span>
+  );
+}
 
 function ProductImage({ p, h }: { p: Product; h?: number }) {
   const [failed, setFailed] = useState(false);
@@ -104,11 +158,26 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
     }
     touchX.current = null; setPaused(false);
   };
+  // If a touch is cancelled (interrupted), the banner must resume —
+  // without this, a cancelled swipe left `paused` stuck on true and the
+  // auto-rotation never came back.
+  const onTouchCancel = () => { touchX.current = null; setPaused(false); };
   const reduced = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // Auto-advance with a running interval, not a one-shot timeout gated
+  // on document.hidden. The old timeout returned early (no timer set at
+  // all) when the tab happened to be hidden at mount, and nothing ever
+  // re-triggered it — so the banner sat on one slide forever, on the
+  // test browser and on the owner's phone. Now the interval is always
+  // running (unless paused / reduced-motion / fewer than 2 slides) and
+  // the callback simply skips advancing while the tab is hidden, so
+  // rotation resumes the moment the tab is visible again.
   useEffect(() => {
-    if (slides.length < 2 || paused || reduced || document.hidden) return;
-    const id = setTimeout(() => setIdx((i) => (i + 1) % slides.length), 3000);
-    return () => clearTimeout(id);
+    if (slides.length < 2 || paused || reduced) return;
+    const id = window.setInterval(() => {
+      if (document.hidden) return;
+      setIdx((i) => (i + 1) % slides.length);
+    }, 3000);
+    return () => window.clearInterval(id);
   }, [idx, paused, slides.length, reduced]);
   if (slides.length === 0) return null;
   const slide = slides[idx % slides.length];
@@ -116,7 +185,7 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
   const product = slide.product;
   return (
     <div className="card mt-4 overflow-hidden" role="region" aria-label={tr(lang, "Café Reza promos", "ক্যাফে রেজার প্রোমো")}
-      onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ touchAction: "pan-y" }}>
+      onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} onTouchCancel={onTouchCancel} style={{ touchAction: "pan-y" }}>
       <button type="button" onClick={() => onSelect(product)} className="block w-full text-left" style={{ background: "none", border: "none", padding: 0 }}>
         <div style={{ position: "relative", background: "#0d0906", height: "min(44vw, 200px)", overflow: "hidden" }}>
           {slides.map((s, i) => (
@@ -160,6 +229,51 @@ function AdSlotView({ slotId, adsJson }: { slotId: string; adsJson?: string | nu
   if (!src || !/^https?:\/\//i.test(src)) return null;
   const img = <img src={src} alt="Advertisement" loading="lazy" style={{ width: "100%", height: 104, objectFit: "cover", borderRadius: 12, border: "1px solid var(--border)" }} />;
   return <div className="mt-4" aria-label="Advertisement"><p className="text-center small muted">ADVERTISEMENT</p>{slot.linkUrl.trim() ? <a href={slot.linkUrl} target="_blank" rel="noreferrer sponsored">{img}</a> : img}</div>;
+}
+
+function OffersSection({ settings, lang }: { settings: Settings; lang: Lang }) {
+  // The cafe's live offers, in one place on the homepage. Each offer
+  // below is also enforced in the order transaction, so what is
+  // promised here is what the customer is actually charged — and
+  // every number comes from the admin Settings, never hard-coded.
+  // The Happy Hour card flips to "running now" live while it lasts.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((t) => t + 1), 30000);
+    return () => window.clearInterval(id);
+  }, []);
+  const minQty = settings.comboMinQty ?? COMBO_MIN_QTY;
+  const comboAmt = settings.comboDiscount ?? COMBO_DISCOUNT_PER_LINE;
+  const hhStart = settings.happyHourStart ?? HAPPY_HOUR_START;
+  const hhEnd = settings.happyHourEnd ?? HAPPY_HOUR_END;
+  const hhPct = settings.happyHourPercent ?? HAPPY_HOUR_PERCENT;
+  const happyNow = isHappyHour(new Date(), timeToMin(hhStart), timeToMin(hhEnd));
+  return (
+    <section className="card" style={{ marginTop: 14, padding: 14, border: "2px solid var(--gold)" }} aria-label={tr(lang, "Offers and combos", "অফার ও কম্বো")}>
+      <h2 className="serif" style={{ fontSize: 20, margin: 0 }}>🎁 {tr(lang, "Offers & Combos", "অফার ও কম্বো")}</h2>
+      <div className="row" style={{ marginTop: 10 }}>
+        <div className="card" style={{ padding: 12, flex: 1, minWidth: 220 }}>
+          <b>{tr(lang, "Combo offer", "কম্বো অফার")}</b>
+          <p className="small" style={{ margin: "4px 0 0" }}>{lang === "bn"
+            ? `একই আইটেম ${minQty}টা বা বেশি কিনলে ${comboAmt} টাকা ছাড় — চেকআউটে নিজে নিজেই বসবে, ${minQty}টা হওয়া প্রতিটি আইটেমে একবার করে। কোনো ফ্রি আইটেমের অফার নেই।`
+            : `Buy ${minQty} or more of the same item and get ৳${comboAmt} off — applied automatically at checkout, once per item that reaches ${minQty}. No free-item offer.`}</p>
+        </div>
+        <div className="card" style={{ padding: 12, flex: 1, minWidth: 220, border: happyNow ? "2px solid var(--good)" : undefined }}>
+          <b>🕓 {tr(lang, "Happy Hour", "হ্যাপি আওয়ার")} {happyNow && <span style={{ background: "var(--good)", color: "#fff", borderRadius: 999, padding: "2px 10px", fontSize: 12 }}>● {tr(lang, "Running now", "এখন চলছে")}</span>}</b>
+          <p className="small" style={{ margin: "4px 0 0" }}>{lang === "bn"
+            ? `প্রতিদিন ${hhStart}–${hhEnd}: পুরো অর্ডারে ${hhPct}% ছাড়, চেকআউটে নিজে নিজেই বসবে।`
+            : `Every day ${hhStart}–${hhEnd}: ${hhPct}% off your whole order, applied automatically at checkout.`}</p>
+        </div>
+        <div className="card" style={{ padding: 12, flex: 1, minWidth: 220 }}>
+          <b>🎟️ {tr(lang, "First order — 10% off", "প্রথম অর্ডারে ১০% ছাড়")}</b>
+          <p className="small" style={{ margin: "4px 0 0" }}>{lang === "bn"
+            ? "নতুন কাস্টমার? প্রথম অর্ডারে কুপন কোড WELCOME10 ব্যবহার করুন — ১০% ছাড় পাবেন। শুধু প্রথম অর্ডারের জন্য।"
+            : "New here? Use coupon code WELCOME10 on your first order and get 10% off. First order only."}</p>
+          <p className="small" style={{ margin: "6px 0 0" }}><code style={{ background: "var(--gold)", color: "#fff", borderRadius: 6, padding: "3px 10px", fontWeight: 700, letterSpacing: 1 }}>WELCOME10</code></p>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function GoogleG({ size = 20 }: { size?: number }) {
@@ -303,11 +417,15 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   const [tableLabel, setTableLabel] = useState("");
   const [payment, setPayment] = useState("Cash on Delivery");
   const [coupon, setCoupon] = useState("");
+  const [redeem, setRedeem] = useState(false);
+  const [couponInfo, setCouponInfo] = useState<{ status: "idle" | "ok" | "error"; discount: number; note: string; checkedSubtotal: number }>({ status: "idle", discount: 0, note: "", checkedSubtotal: -1 });
   const [ref, setRef] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [doneNo, setDoneNo] = useState("");
   const [doneTotal, setDoneTotal] = useState(0);
+  const [doneReceipt, setDoneReceipt] = useState<Order | null>(null);
+  const [showReceipt, setShowReceipt] = useState(false);
   useEffect(() => {
     if (open) { setStep("cart"); setErr(""); window.scrollTo({ top: 0, left: 0, behavior: "auto" }); }
   }, [open ]);
@@ -325,9 +443,58 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
     return p ? { product: p, qty: c.qty, size: c.size, sugar: c.sugar, milk: c.milk, note: c.note } : null;
   }).filter((l): l is CartLine => l !== null);
   const subtotal = lines.reduce((a, l) => a + effPrice(l.product) * l.qty, 0);
-  const vat = Math.round((subtotal * settings.vatPercent) / 100);
-  const fee = orderType === "delivery" ? (settings.freeDeliveryAt > 0 && subtotal >= settings.freeDeliveryAt ? 0 : settings.deliveryFee) : 0;
+  // The same discount math as placeOrderTx, so the price shown here is
+  // the price actually charged. VAT and the free-delivery threshold
+  // both use the after-discount amount, exactly like the transaction.
+  const combo = comboDiscount(lines.map((l) => ({ qty: l.qty })), settings.comboMinQty ?? COMBO_MIN_QTY, settings.comboDiscount ?? COMBO_DISCOUNT_PER_LINE);
+  const happy = happyHourDiscount(subtotal, new Date(), timeToMin(settings.happyHourStart ?? HAPPY_HOUR_START), timeToMin(settings.happyHourEnd ?? HAPPY_HOUR_END), settings.happyHourPercent ?? HAPPY_HOUR_PERCENT);
+  // Coupon preview: the customer checks the code before ordering, so
+  // they see the discount (or a clear reason it does not apply) up
+  // front. The preview is only used when the cart has not changed
+  // since the check — otherwise the button must be tapped again —
+  // and the transaction re-validates the coupon when placing the
+  // order, so the preview can never promise a discount the order
+  // will not actually get.
+  const couponDisc = couponInfo.status === "ok" && couponInfo.checkedSubtotal === subtotal ? couponInfo.discount : 0;
+  // Loyalty redemption: every `loyaltyRedeemPoints` points are worth
+  // `loyaltyRedeemValue` off. The checkbox spends all the blocks the
+  // customer has; the transaction clamps it to their real balance.
+  const redeemPoints = settings.loyaltyRedeemPoints || 100;
+  const redeemValue = settings.loyaltyRedeemValue || 0;
+  const maxRedeemBlocks = userDoc && redeemPoints > 0 && redeemValue > 0 ? Math.floor(userDoc.loyaltyPoints / redeemPoints) : 0;
+  const redeemBlocks = redeem && maxRedeemBlocks > 0 ? maxRedeemBlocks : 0;
+  const loyaltyDisc = Math.min(subtotal, redeemBlocks * redeemValue);
+  const discount = Math.min(subtotal, combo + happy + couponDisc + loyaltyDisc);
+  const afterDiscount = Math.max(0, subtotal - discount);
+  const vat = Math.round((afterDiscount * settings.vatPercent) / 100);
+  const fee = orderType === "delivery" ? (settings.freeDeliveryAt > 0 && afterDiscount >= settings.freeDeliveryAt ? 0 : settings.deliveryFee) : 0;
+  const total = afterDiscount + vat + fee;
   const payments = enabledPayments(settings.paymentsJson);
+  const checkCoupon = async () => {
+    const code = coupon.trim().toUpperCase();
+    if (!code) { setCouponInfo({ status: "idle", discount: 0, note: "", checkedSubtotal: -1 }); return; }
+    const firestore = getDb();
+    if (!firestore) { setCouponInfo({ status: "error", discount: 0, note: tr(lang, "Could not check the coupon.", "কুপন যাচাই করা যায়নি।"), checkedSubtotal: -1 }); return; }
+    try {
+      const snap = await getDoc(doc(firestore, "coupons", code));
+      if (!snap.exists()) { setCouponInfo({ status: "error", discount: 0, note: tr(lang, "Coupon code not found.", "কুপন কোড পাওয়া যায়নি।"), checkedSubtotal: -1 }); return; }
+      const c = snap.data() as { active?: boolean; kind?: string; value?: number; minPurchase?: number; maxDiscount?: number | null; expiresAt?: string; firstOrderOnly?: boolean };
+      if (!c.active) { setCouponInfo({ status: "error", discount: 0, note: tr(lang, "This coupon is not active.", "এই কুপনটি সক্রিয় নয়।"), checkedSubtotal: -1 }); return; }
+      if (c.expiresAt && c.expiresAt < new Date().toISOString().slice(0, 10)) { setCouponInfo({ status: "error", discount: 0, note: tr(lang, "This coupon has expired.", "এই কুপনের মেয়াদ শেষ।"), checkedSubtotal: -1 }); return; }
+      if (Number(c.minPurchase ?? 0) > subtotal) { setCouponInfo({ status: "error", discount: 0, note: tr(lang, `This coupon needs a minimum purchase of ৳${c.minPurchase}.`, `এই কুপনে সর্বনিম্ন ${c.minPurchase} টাকা কেনাকাটা লাগবে।`), checkedSubtotal: -1 }); return; }
+      if (c.firstOrderOnly) {
+        if (!fbUser) { setCouponInfo({ status: "error", discount: 0, note: tr(lang, "Sign in to use this first-order coupon.", "এই প্রথম-অর্ডারের কুপন ব্যবহার করতে সাইন-ইন করুন।"), checkedSubtotal: -1 }); return; }
+        const prior = await getDocs(query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), limit(1)));
+        if (!prior.empty) { setCouponInfo({ status: "error", discount: 0, note: tr(lang, "This coupon is only for your first order — you already have an order.", "এই কুপন শুধু আপনার প্রথম অর্ডারের জন্য — আপনার আগের অর্ডার আছে।"), checkedSubtotal: -1 }); return; }
+      }
+      let d = c.kind === "percent" ? Math.round((subtotal * Number(c.value ?? 0)) / 100) : Number(c.value ?? 0);
+      if (c.maxDiscount != null) d = Math.min(d, Number(c.maxDiscount));
+      d = Math.min(d, subtotal);
+      setCouponInfo({ status: "ok", discount: d, note: tr(lang, `Coupon ${code} applied: ৳${d} off`, `কুপন ${code} লেগেছে: ${d} টাকা ছাড়`), checkedSubtotal: subtotal });
+    } catch {
+      setCouponInfo({ status: "error", discount: 0, note: tr(lang, "Could not check the coupon.", "কুপন যাচাই করা যায়নি।"), checkedSubtotal: -1 });
+    }
+  };
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!fbUser) { setErr(tr(lang, "Sign in first — orders need a signed-in account (Google, Facebook or phone).", "আগে সাইন-ইন করুন — অর্ডারের জন্য সাইন-ইন করা অ্যাকাউন্ট লাগবে (Google, Facebook বা ফোন)।")); return; }
@@ -336,7 +503,7 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
       uid: fbUser.uid, customerName: name.trim(), phone: phone.trim(), address: address.trim(),
       orderType, source: "website", paymentMethod: payment, paymentRef: ref.trim(),
       tableLabel: orderType === "dine-in" ? tableLabel.trim() : "", notes: "", staffName: "",
-      couponCode: coupon, lines, settings, paidAmount: 0,
+      couponCode: coupon, lines, settings, paidAmount: 0, redeemBlocks,
     });
     setBusy(false);
     if (!r.ok || !r.orderNo) { setErr(r.error ?? tr(lang, "Order failed.", "অর্ডার ব্যর্থ হয়েছে।")); return; }
@@ -344,7 +511,7 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
       const recent = JSON.parse(localStorage.getItem("cr_recent_orders") ?? "[]") as Array<{ orderNo: string; phone: string }>;
       localStorage.setItem("cr_recent_orders", JSON.stringify([{ orderNo: r.orderNo, phone: phone.trim() }, ...recent].slice(0, 20)));
     } catch { /* recents are best-effort */ }
-    setDoneNo(r.orderNo); setDoneTotal(subtotal + vat + fee);
+    setDoneNo(r.orderNo); setDoneTotal(r.total ?? total); setDoneReceipt(r.receipt ?? null);
     setCart([]); setStep("done");
   };
   return (
@@ -362,6 +529,7 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
               <p>{tr(lang, "Order number:", "অর্ডার নম্বর:")} <b>{doneNo}</b></p>
               <p>{tr(lang, "Total:", "মোট:")} <b>{tk(doneTotal)}</b></p>
               <p className="small muted">{tr(lang, "Track it from the Track page.", "ট্র্যাক পেজ থেকে এটি ট্র্যাক করুন।")}</p>
+              {doneReceipt && <button className="btn-ghost" style={{ width: "100%", marginTop: 8 }} onClick={() => setShowReceipt(true)}>🧾 {tr(lang, "View receipt", "রিসিট দেখুন")}</button>}
               <button className="btn-gold" style={{ width: "100%", marginTop: 12 }} onClick={onClose}>{tr(lang, "Done", "সম্পন্ন")}</button>
             </div>
           ) : step === "cart" ? (
@@ -400,12 +568,27 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
                   <label>{tr(lang, "Transaction / reference ID", "লেনদেন / রেফারেন্স আইডি")}<input aria-label="Transaction reference ID" value={ref} onChange={(e) => setRef(e.target.value)} /></label>
                 </div>
               )}
-              <label>{tr(lang, "Coupon code (optional)", "কুপন কোড (ঐচ্ছিক)")}<input aria-label="Coupon code" value={coupon} onChange={(e) => setCoupon(e.target.value.toUpperCase())} /></label>
+              <label>{tr(lang, "Coupon code (optional)", "কুপন কোড (ঐচ্ছিক)")}<input aria-label="Coupon code" value={coupon} onChange={(e) => { setCoupon(e.target.value.toUpperCase()); setCouponInfo({ status: "idle", discount: 0, note: "", checkedSubtotal: -1 }); }} /></label>
+              <div className="row" style={{ marginTop: 6 }}>
+                <button className="btn-ghost" type="button" onClick={() => void checkCoupon()}>{tr(lang, "Check coupon", "কুপন যাচাই করুন")}</button>
+                {couponInfo.status !== "idle" && <span className="small" role="status" style={{ color: couponInfo.status === "ok" ? "var(--good)" : "var(--bad)", fontWeight: 700 }}>{couponInfo.note}</span>}
+                {couponInfo.status === "ok" && couponInfo.checkedSubtotal !== subtotal && <span className="small muted">{tr(lang, "Cart changed — check the coupon again.", "কার্ট বদলেছে — কুপন আবার যাচাই করুন।")}</span>}
+              </div>
+              {maxRedeemBlocks > 0 && (
+                <label style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10 }}>
+                  <input type="checkbox" style={{ width: "auto" }} checked={redeem} onChange={(e) => setRedeem(e.target.checked)} />
+                  <span>{lang === "bn" ? `লয়্যালটি পয়েন্ট ব্যবহার করুন — ${maxRedeemBlocks * redeemValue} টাকা ছাড় (${userDoc?.loyaltyPoints ?? 0} পয়েন্ট)` : `Use loyalty points — ৳${maxRedeemBlocks * redeemValue} off (${userDoc?.loyaltyPoints ?? 0} points)`}</span>
+                </label>
+              )}
               <div style={{ marginTop: 10, fontSize: 14 }}>
                 <div className="row" style={{ justifyContent: "space-between" }}><span>{tr(lang, "Subtotal", "সাবটোটাল")}</span><span>{tk(subtotal)}</span></div>
+                {combo > 0 && <div className="row" style={{ justifyContent: "space-between", color: "var(--good)", fontWeight: 700 }}><span>{lang === "bn" ? `কম্বো ছাড় (এক আইটেম ${settings.comboMinQty ?? COMBO_MIN_QTY}টা+ → ${settings.comboDiscount ?? COMBO_DISCOUNT_PER_LINE} টাকা ছাড়)` : `Combo discount (${settings.comboMinQty ?? COMBO_MIN_QTY}+ of one item → ৳${settings.comboDiscount ?? COMBO_DISCOUNT_PER_LINE} off)`}</span><span>−{tk(combo)}</span></div>}
+                {happy > 0 && <div className="row" style={{ justifyContent: "space-between", color: "var(--good)", fontWeight: 700 }}><span>{tr(lang, "Happy Hour discount", "হ্যাপি আওয়ার ছাড়")} ({settings.happyHourPercent ?? HAPPY_HOUR_PERCENT}%)</span><span>−{tk(happy)}</span></div>}
+                {couponDisc > 0 && <div className="row" style={{ justifyContent: "space-between", color: "var(--good)", fontWeight: 700 }}><span>{tr(lang, "Coupon discount", "কুপন ছাড়")} ({coupon.trim().toUpperCase()})</span><span>−{tk(couponDisc)}</span></div>}
+                {loyaltyDisc > 0 && <div className="row" style={{ justifyContent: "space-between", color: "var(--good)", fontWeight: 700 }}><span>{tr(lang, "Loyalty points discount", "লয়্যালটি পয়েন্ট ছাড়")} ({redeemBlocks * redeemPoints} {tr(lang, "points", "পয়েন্ট")})</span><span>−{tk(loyaltyDisc)}</span></div>}
                 <div className="row" style={{ justifyContent: "space-between" }}><span>VAT ({settings.vatPercent}%)</span><span>{tk(vat)}</span></div>
                 <div className="row" style={{ justifyContent: "space-between" }}><span>{tr(lang, "Delivery", "ডেলিভারি")}</span><span>{fee === 0 ? tr(lang, "Free", "ফ্রি") : tk(fee)}</span></div>
-                <div className="row" style={{ justifyContent: "space-between", fontWeight: 700, fontSize: 16 }}><span>{tr(lang, "Total", "মোট")}</span><span>{tk(subtotal + vat + fee)}</span></div>
+                <div className="row" style={{ justifyContent: "space-between", fontWeight: 700, fontSize: 16 }}><span>{tr(lang, "Total", "মোট")}</span><span>{tk(total)}</span></div>
               </div>
               {err && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{err}</p>}
             </form>
@@ -416,20 +599,77 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
         {step !== "done" && lines.length > 0 && (
           <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
             <div className="row" style={{ justifyContent: "space-between" }}><span className="small muted">{tr(lang, "Subtotal", "সাবটোটাল")}</span><b>{tk(subtotal)}</b></div>
+            {combo > 0 && <div className="row" style={{ justifyContent: "space-between" }}><span className="small" style={{ color: "var(--good)", fontWeight: 700 }}>{tr(lang, "Combo discount", "কম্বো ছাড়")}</span><b style={{ color: "var(--good)" }}>−{tk(combo)}</b></div>}
+            {happy > 0 && <div className="row" style={{ justifyContent: "space-between" }}><span className="small" style={{ color: "var(--good)", fontWeight: 700 }}>{tr(lang, "Happy Hour discount", "হ্যাপি আওয়ার ছাড়")} ({settings.happyHourPercent ?? HAPPY_HOUR_PERCENT}%)</span><b style={{ color: "var(--good)" }}>−{tk(happy)}</b></div>}
+            {couponDisc > 0 && <div className="row" style={{ justifyContent: "space-between" }}><span className="small" style={{ color: "var(--good)", fontWeight: 700 }}>{tr(lang, "Coupon discount", "কুপন ছাড়")} ({coupon.trim().toUpperCase()})</span><b style={{ color: "var(--good)" }}>−{tk(couponDisc)}</b></div>}
+            {loyaltyDisc > 0 && <div className="row" style={{ justifyContent: "space-between" }}><span className="small" style={{ color: "var(--good)", fontWeight: 700 }}>{tr(lang, "Loyalty points discount", "লয়্যালটি পয়েন্ট ছাড়")}</span><b style={{ color: "var(--good)" }}>−{tk(loyaltyDisc)}</b></div>}
             {step === "cart"
               ? <button className="btn-gold" style={{ width: "100%", marginTop: 8, padding: "12px" }} onClick={() => setStep("checkout")}>{tr(lang, "Go to checkout", "চেকআউটে যান")}</button>
               : <>
-                  <button className="btn-gold" style={{ width: "100%", marginTop: 8, padding: "12px" }} type="submit" form="fb-checkout-form" disabled={busy}>{busy ? tr(lang, "Placing…", "অর্ডার হচ্ছে…") : `${tr(lang, "Place order", "অর্ডার করুন")} • ${tk(subtotal + vat + fee)}`}</button>
+                  <button className="btn-gold" style={{ width: "100%", marginTop: 8, padding: "12px" }} type="submit" form="fb-checkout-form" disabled={busy}>{busy ? tr(lang, "Placing…", "অর্ডার হচ্ছে…") : `${tr(lang, "Place order", "অর্ডার করুন")} • ${tk(total)}`}</button>
                   <button className="btn-ghost" style={{ width: "100%", marginTop: 8 }} onClick={() => setStep("cart")}>{tr(lang, "Back to cart", "কার্টে ফিরুন")}</button>
                 </>}
           </div>
         )}
       </div>
+      {showReceipt && doneReceipt && <ReceiptModal order={doneReceipt} settings={settings} products={products} lang={lang} onClose={() => setShowReceipt(false)} />}
     </div>
   );
 }
 
 const TRACK_STAGES = ["Pending", "Confirmed", "Preparing", "Ready", "Out for Delivery", "Delivered"];
+
+// A clock that ticks every `intervalMs` so time-sensitive UI (the
+// open-now badge, the cancel window) updates without a reload.
+function useNow(intervalMs = 15000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+// Whether a customer may still cancel this order themselves: only
+// while it is Pending/Confirmed and inside the cancel window (an
+// admin setting, in minutes) from when it was placed.
+function cancelRemainingMs(o: Order, settings: Settings, now: number): number {
+  if (o.status !== "Pending" && o.status !== "Confirmed") return 0;
+  const created = Date.parse(o.createdAt);
+  if (!created) return 0;
+  return (settings.cancelWindowMinutes ?? 2) * 60 * 1000 - (now - created);
+}
+
+// The customer cancel button, shared by the Track page and the
+// Account order list. It only renders inside the window — after the
+// window lapses it disappears entirely — and it asks for
+// confirmation, cancels through the transaction (stock comes back),
+// and reports the result in place.
+function CancelOrderButton({ order, uid, settings, lang }: { order: Order; uid: string; settings: Settings; lang: Lang }) {
+  const now = useNow(15000);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const remaining = cancelRemainingMs(order, settings, now);
+  if (remaining <= 0) return null;
+  const secs = Math.ceil(remaining / 1000);
+  const mm = Math.floor(secs / 60);
+  const ss = String(secs % 60).padStart(2, "0");
+  const cancel = async () => {
+    const ok = window.confirm(tr(lang, `Cancel order ${order.orderNo}? The items go back to stock.`, `অর্ডার ${order.orderNo} বাতিল করবেন? আইটেমগুলো স্টকে ফিরে যাবে।`));
+    if (!ok) return;
+    setBusy(true); setMsg("");
+    const r = await cancelOrderTx({ uid, orderId: order.id, cancelWindowMinutes: settings.cancelWindowMinutes ?? 2, isStaff: false });
+    setBusy(false);
+    setMsg(r.ok ? tr(lang, "Order cancelled.", "অর্ডার বাতিল হয়েছে।") : (r.error ?? tr(lang, "Could not cancel the order.", "অর্ডার বাতিল করা যায়নি।")));
+  };
+  return (
+    <span>
+      <button className="btn-danger" style={{ padding: "6px 12px" }} disabled={busy} onClick={() => void cancel()}>{busy ? tr(lang, "Cancelling…", "বাতিল হচ্ছে…") : tr(lang, "Cancel order", "অর্ডার বাতিল করুন")}</button>
+      <span className="small muted" style={{ marginLeft: 8 }}>{tr(lang, "You can cancel for", "বাতিল করা যাবে")} {mm}:{ss}</span>
+      {msg && <span className="small" role="status" style={{ marginLeft: 8 }}>{msg}</span>}
+    </span>
+  );
+}
 // Order status in the customer's language, with a clear badge colour:
 // gold = waiting / in progress, green = done, red = cancelled / refunded.
 const STATUS_BN: Record<string, string> = {
@@ -462,13 +702,15 @@ const fmtDate = (raw: string) => {
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
 };
 
-function TrackView({ fbUser, products, lang }: { fbUser: User | null; products: Product[]; lang: Lang }) {
+function TrackView({ fbUser, products, settings, lang }: { fbUser: User | null; products: Product[]; settings: Settings; lang: Lang }) {
   const firestore = getDb();
   const { data: orders, loading: ordersLoading, error: ordersError } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
     orderFromDoc,
   );
   const [search, setSearch] = useState("");
+  const [receiptOrder, setReceiptOrder] = useState<Order | null>(null);
+  const now = useNow(15000);
   if (!fbUser) return <p className="muted">{tr(lang, "Sign in to track your orders.", "অর্ডার ট্র্যাক করতে সাইন-ইন করুন।")}</p>;
   const shown = search.trim() ? orders.filter((o) => o.orderNo.toLowerCase().includes(search.trim().toLowerCase())) : orders;
   return (
@@ -495,9 +737,15 @@ function TrackView({ fbUser, products, lang }: { fbUser: User | null; products: 
               </div>
             )}
             <ul style={{ marginTop: 8, fontSize: 14 }}>{o.items.map((it, i) => <li key={i}>{it.qty} × {orderItemName(products, it, lang)}</li>)}</ul>
+            <div style={{ marginTop: 8 }}>
+              <CancelOrderButton order={o} uid={fbUser.uid} settings={settings} lang={lang} />
+              <button className="btn-ghost" style={{ padding: "6px 12px", marginLeft: 8 }} onClick={() => setReceiptOrder(o)}>🧾 {tr(lang, "Receipt", "রিসিট")}</button>
+              {!isEnded && cancelRemainingMs(o, settings, now) <= 0 && <span className="small muted">{tr(lang, "The cancellation window has passed — message the cafe in the chatbox if you need help.", "বাতিলের সময়সীমা পেরিয়ে গেছে — সাহায্য লাগলে চ্যাটবক্সে ক্যাফেকে মেসেজ করুন।")}</span>}
+            </div>
           </div>
         );
       })}
+      {receiptOrder && <ReceiptModal order={receiptOrder} settings={settings} products={products} lang={lang} onClose={() => setReceiptOrder(null)} />}
     </div>
   );
 }
@@ -555,7 +803,7 @@ function ReserveView({ fbUser, userDoc, lang }: { fbUser: User | null; userDoc: 
   );
 }
 
-function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; lang: Lang; onLoginSuccess: () => void }) {
+function AccountView({ fbUser, userDoc, products, settings, lang, onLoginSuccess }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; settings: Settings; lang: Lang; onLoginSuccess: () => void }) {
   const firestore = getDb();
   const { data: orders, loading: ordersLoading, error: ordersError } = useLive<Order>(
     () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc")) : null),
@@ -564,6 +812,7 @@ function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUs
   const [addrDraft, setAddrDraft] = useState("");
   const [msgDraft, setMsgDraft] = useState("");
   const [msgDone, setMsgDone] = useState("");
+  const [receiptOrder, setReceiptOrder] = useState<Order | null>(null);
   if (!fbUser) return <SignInCard lang={lang} onSignedIn={onLoginSuccess} />;
   const contact = userDoc?.phone ? userDoc.phone : (fbUser.email ?? fbUser.phoneNumber ?? "");
   const sendMessage = async () => {
@@ -580,11 +829,26 @@ function AccountView({ fbUser, userDoc, products, lang, onLoginSuccess }: { fbUs
           <button className="btn-ghost" onClick={() => void signOutUser()}>{tr(lang, "Sign out", "সাইন-আউট")}</button>
         </div>
       </div>
+      <div className="card" style={{ padding: 14, border: "2px solid var(--gold)", marginTop: 12 }}>
+        <b>⭐ {tr(lang, "Loyalty points", "লয়্যালটি পয়েন্ট")}</b>
+        <p style={{ fontSize: 26, fontWeight: 700, margin: "6px 0 2px" }}>{userDoc?.loyaltyPoints ?? 0} {tr(lang, "points", "পয়েন্ট")}</p>
+        <p className="small muted" style={{ margin: 0 }}>{tr(lang, "Tier:", "স্তর:")} {userDoc?.tier ?? "Bronze"}</p>
+        <p className="small" style={{ marginTop: 8 }}>{lang === "bn"
+          ? `প্রতি ${settings.loyaltyPerAmount} টাকার অর্ডারে ১ পয়েন্ট। ${settings.loyaltyRedeemPoints} পয়েন্ট হলে ${settings.loyaltyRedeemValue} টাকা ছাড় — চেকআউটে পয়েন্ট ব্যবহার করুন।`
+          : `1 point per ৳${settings.loyaltyPerAmount} spent. ${settings.loyaltyRedeemPoints} points = ৳${settings.loyaltyRedeemValue} off — use your points at checkout.`}</p>
+        {(() => {
+          const blocks = Math.floor((userDoc?.loyaltyPoints ?? 0) / (settings.loyaltyRedeemPoints || 100));
+          return blocks > 0
+            ? <p className="small" style={{ color: "var(--good)", fontWeight: 700 }}>{lang === "bn" ? `আপনার ${blocks * settings.loyaltyRedeemValue} টাকা ছাড় পাওয়ার মতো পয়েন্ট আছে (${blocks} ব্লক)।` : `You have enough points for ৳${blocks * settings.loyaltyRedeemValue} off (${blocks} block${blocks > 1 ? "s" : ""}).`}</p>
+            : <p className="small muted">{lang === "bn" ? `${settings.loyaltyRedeemPoints - (userDoc?.loyaltyPoints ?? 0)} পয়েন্ট বাকি থাকলে প্রথম ছাড় পাবেন।` : `${settings.loyaltyRedeemPoints - (userDoc?.loyaltyPoints ?? 0)} more points to your first reward.`}</p>;
+        })()}
+      </div>
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "My orders", "আমার অর্ডারগুলো")}</h3>
       {ordersError && <p className="small" role="alert" style={{ color: "var(--bad)" }}>{tr(lang, "Could not load your orders. Please try again.", "আপনার অর্ডারগুলো লোড করা যায়নি। আবার চেষ্টা করুন।")}</p>}
       {ordersLoading && !ordersError && <p className="muted small">{tr(lang, "Loading your orders…", "অর্ডারগুলো লোড হচ্ছে…")}</p>}
       {!ordersLoading && orders.length === 0 && !ordersError && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
-      {orders.slice(0, 10).map((o) => <div key={o.id} className="card" style={{ marginTop: 8, padding: 12 }}><div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div><p className="small" style={{ marginTop: 4 }}>{o.items.map((it) => `${it.qty} × ${orderItemName(products, it, lang)}`).join(" • ")}</p><p className="small muted" style={{ marginTop: 2 }}>{fmtDate(o.createdAt)}</p><p className="small muted"><span className="chip" style={{ ...statusBadgeStyle(o.status), padding: "2px 8px", fontWeight: 700 }}>{statusLabel(o.status, lang)}</span> {o.paymentMethod} • {paymentStatusLabel(o.paymentStatus, lang)}</p></div>)}
+      {orders.slice(0, 10).map((o) => <div key={o.id} className="card" style={{ marginTop: 8, padding: 12 }}><div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)}</span></div><p className="small" style={{ marginTop: 4 }}>{o.items.map((it) => `${it.qty} × ${orderItemName(products, it, lang)}`).join(" • ")}</p><p className="small muted" style={{ marginTop: 2 }}>{fmtDate(o.createdAt)}</p><p className="small muted"><span className="chip" style={{ ...statusBadgeStyle(o.status), padding: "2px 8px", fontWeight: 700 }}>{statusLabel(o.status, lang)}</span> {o.paymentMethod} • {paymentStatusLabel(o.paymentStatus, lang)}</p><div style={{ marginTop: 8 }}><CancelOrderButton order={o} uid={fbUser.uid} settings={settings} lang={lang} /> <button className="btn-ghost" style={{ padding: "6px 12px" }} onClick={() => setReceiptOrder(o)}>🧾 {tr(lang, "Receipt", "রিসিট")}</button></div></div>)}
+      {receiptOrder && <ReceiptModal order={receiptOrder} settings={settings} products={products} lang={lang} onClose={() => setReceiptOrder(null)} />}
       <h3 className="serif" style={{ fontSize: 19, marginTop: 18 }}>{tr(lang, "Favourites", "প্রিয় আইটেম")}</h3>
       {(!userDoc || userDoc.wishlist.length === 0) && <p className="muted small">{tr(lang, "No favourites yet — tap the heart on a product.", "এখনো প্রিয় আইটেম নেই — প্রোডাক্টের হার্ট চাপুন।")}</p>}
       <div className="row">{(userDoc?.wishlist ?? []).map((slug) => { const p = products.find((x) => x.slug === slug); return p ? <span key={slug} className="chip">{displayName(p, lang)}</span> : null; })}</div>
@@ -623,6 +887,7 @@ function InfoView({ settings, lang }: { settings: Settings; lang: Lang }) {
       </div>
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Opening hours", "খোলার সময়")}</b>
+        <div style={{ marginTop: 8 }}><OpenNowBadge settings={settings} lang={lang} /></div>
         {hours.length === 0
           ? <p className="muted small" style={{ marginTop: 6 }}>{settings.hours || tr(lang, "Hours are not set yet.", "সময় এখনো বসানো হয়নি।")}</p>
           : <table><tbody>{hours.map((h) => <tr key={h.day}><td>{h.day}</td><td>{h.closed ? tr(lang, "Closed", "বন্ধ") : `${h.open} – ${h.close}`}</td></tr>)}</tbody></table>}
@@ -657,6 +922,111 @@ class PanelErrorBoundary extends Component<{ children: ReactNode; lang: Lang; on
     }
     return this.props.children;
   }
+}
+
+// In-app chatbox: a floating 💬 button on the customer site opens a
+// popup chat between the signed-in customer and the admin/staff. The
+// conversation lives in the existing `messages` collection (the same
+// one the Account "Message the cafe" form and the admin Support tab
+// use), so there is one inbox, not two. The AI assistant answers
+// inside the same chat when the owner has put a Gemini key in
+// Settings; without a key the chat still works and the admin replies.
+// Unread staff replies are counted client-side (localStorage
+// last-read time), because the rules do not let customers update
+// readFlag. The button sits bottom-left so it never covers the
+// bottom-right "View cart" button.
+function ChatBox({ fbUser, userDoc, products, settings, lang }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; settings: Settings; lang: Lang }) {
+  const firestore = getDb();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiNote, setAiNote] = useState("");
+  const [lastRead, setLastRead] = useState(0);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const { data: messages } = useLive<{ id: string; author: string; authorName: string; body: string; createdAt: string }>(
+    () => (firestore && fbUser ? query(collection(firestore, "messages"), where("userId", "==", fbUser.uid), orderBy("createdAt", "asc"), limit(100)) : null),
+    (id, d) => ({ id, author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), body: String(d.body ?? ""), createdAt: tsToIso(d.createdAt) }),
+    [fbUser?.uid],
+  );
+  useEffect(() => {
+    if (!fbUser) { setLastRead(0); return; }
+    try { setLastRead(Number(localStorage.getItem(`cr_chat_last_read_${fbUser.uid}`) ?? 0)); } catch { setLastRead(0); }
+  }, [fbUser]);
+  const markRead = () => {
+    if (!fbUser) return;
+    const t = Date.now();
+    try { localStorage.setItem(`cr_chat_last_read_${fbUser.uid}`, String(t)); } catch { /* best-effort */ }
+    setLastRead(t);
+  };
+  useEffect(() => { if (open) markRead(); }, [open, messages]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (open && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+  }, [open, messages]);
+  const unread = messages.filter((m) => (m.author === "staff" || m.author === "ai") && Date.parse(m.createdAt) > lastRead).length;
+  const send = async () => {
+    if (!firestore || !fbUser || !draft.trim() || sending) return;
+    const text = draft.trim();
+    setDraft(""); setAiNote(""); setSending(true);
+    try {
+      await addDoc(collection(firestore, "messages"), { userId: fbUser.uid, guestName: userDoc?.name ?? "", guestPhone: userDoc?.phone ?? "", orderNo: "", author: "customer", authorName: userDoc?.name ?? "", body: text, readFlag: false, createdAt: serverTimestamp() });
+      // AI reply (best-effort): the chat works with or without it.
+      const key = settings.geminiApiKey?.trim() ?? "";
+      if (!key) {
+        setAiNote(tr(lang, "AI is not set up yet — your message reached the admin.", "AI এখনো চালু হয়নি — আপনার মেসেজ অ্যাডমিনের কাছে পৌঁছেছে।"));
+      } else {
+        setAiBusy(true);
+        const history = messages.filter((m) => m.author === "customer" || m.author === "ai").slice(-10).map((m) => ({ role: (m.author === "ai" ? "model" : "user") as "model" | "user", text: m.body }));
+        const r = await askAi(key, buildAiKnowledge(products, settings), history, text);
+        setAiBusy(false);
+        if (r.ok && r.text) {
+          await addDoc(collection(firestore, "messages"), { userId: fbUser.uid, guestName: "", guestPhone: "", orderNo: "", author: "ai", authorName: tr(lang, "AI Assistant", "AI সহকারী"), body: r.text, readFlag: false, createdAt: serverTimestamp() });
+        } else {
+          setAiNote(tr(lang, "AI could not answer right now — your message reached the admin.", "AI এখন উত্তর দিতে পারছে না — আপনার মেসেজ অ্যাডমিনের কাছে পৌঁছেছে।"));
+        }
+      }
+    } catch {
+      setAiNote(tr(lang, "Message could not be sent. Please try again.", "মেসেজ পাঠানো যায়নি। আবার চেষ্টা করুন।"));
+    }
+    setSending(false);
+  };
+  return (
+    <>
+      <button className="btn-gold no-print" aria-label={tr(lang, "Chat with the cafe", "ক্যাফের সাথে চ্যাট করুন")} onClick={() => { setOpen((v) => !v); if (!open) markRead(); }} style={{ position: "fixed", left: 16, bottom: 76, zIndex: 40, width: 56, height: 56, borderRadius: "50%", fontSize: 24, padding: 0, boxShadow: "0 8px 20px rgba(0,0,0,.35)" }}>
+        💬
+        {unread > 0 && <span style={{ position: "absolute", top: -4, right: -4, background: "var(--bad)", color: "#fff", borderRadius: 999, fontSize: 11, fontWeight: 700, minWidth: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px" }}>{unread}</span>}
+      </button>
+      {open && (
+        <div className="card no-print" role="dialog" aria-label={tr(lang, "Chat with Café Reza", "ক্যাফে রেজার সাথে চ্যাট")} style={{ position: "fixed", left: 16, bottom: 140, zIndex: 50, width: "min(360px, calc(100vw - 32px))", height: 480, maxHeight: "calc(100vh - 160px)", display: "flex", flexDirection: "column", padding: 0, overflow: "hidden", boxShadow: "0 12px 32px rgba(0,0,0,.35)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", background: "var(--gold)", color: "#fff" }}>
+            <b>💬 {tr(lang, "Chat with Café Reza", "ক্যাফে রেজার সাথে চ্যাট")}</b>
+            <button className="btn-ghost" aria-label="Close chat" onClick={() => setOpen(false)} style={{ color: "#fff", padding: "2px 8px" }}>✕</button>
+          </div>
+          {!fbUser ? (
+            <p className="small" style={{ padding: 14 }}>{tr(lang, "Sign in from My Account to chat with the cafe.", "ক্যাফের সাথে চ্যাট করতে My Account থেকে সাইন-ইন করুন।")}</p>
+          ) : (
+            <>
+              <div ref={listRef} style={{ flex: 1, overflow: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                {messages.length === 0 && <p className="small muted">{tr(lang, "Ask anything — the menu, offers, opening hours, or your order. The AI assistant or the admin will reply here.", "যেকোনো কিছু জিজ্ঞেস করুন — মেনু, অফার, খোলার সময়, বা আপনার অর্ডার। AI সহকারী বা অ্যাডমিন এখানেই জবাব দেবেন।")}</p>}
+                {messages.map((m) => (
+                  <div key={m.id} style={{ alignSelf: m.author === "customer" ? "flex-end" : "flex-start", maxWidth: "85%", background: m.author === "customer" ? "var(--gold)" : "var(--surface)", color: m.author === "customer" ? "#fff" : "inherit", borderRadius: 12, padding: "8px 10px" }}>
+                    <span className="small" style={{ fontWeight: 700, opacity: 0.85 }}>{m.author === "ai" ? `🤖 ${m.authorName}` : m.author === "staff" ? `🏪 ${m.authorName || tr(lang, "Café Reza", "ক্যাফে রেজা")}` : tr(lang, "You", "আপনি")}</span>
+                    <p style={{ margin: "2px 0 0", fontSize: 14, whiteSpace: "pre-wrap" }}>{m.body}</p>
+                  </div>
+                ))}
+                {aiBusy && <p className="small muted">{tr(lang, "AI is writing…", "AI লিখছে…")}</p>}
+              </div>
+              {aiNote && <p className="small" role="status" style={{ margin: "0 12px 6px", color: "var(--bad)" }}>{aiNote}</p>}
+              <div className="row" style={{ padding: 10, borderTop: "1px solid var(--border)" }}>
+                <input aria-label={tr(lang, "Write a message", "মেসেজ লিখুন")} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void send(); }} placeholder={tr(lang, "Write a message…", "মেসেজ লিখুন…")} style={{ flex: 1 }} />
+                <button className="btn-gold" disabled={sending || !draft.trim()} onClick={() => void send()}>{sending ? "…" : tr(lang, "Send", "পাঠান")}</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  );
 }
 
 export function App() {
@@ -827,12 +1197,12 @@ export function App() {
           </PanelErrorBoundary>
         </main>
       ) : view === "track" ? (
-        <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><TrackView key={fbUser?.uid ?? "guest"} fbUser={fbUser} products={products} lang={lang} /></main>
+        <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><TrackView key={fbUser?.uid ?? "guest"} fbUser={fbUser} products={products} settings={settings} lang={lang} /></main>
       ) : view === "reserve" ? (
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><ReserveView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} lang={lang} /></main>
       ) : view === "account" ? (
         <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}>
-          <AccountView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} products={products} lang={lang} onLoginSuccess={onLoginSuccess} />
+          <AccountView key={fbUser?.uid ?? "guest"} fbUser={fbUser} userDoc={userDoc} products={products} settings={settings} lang={lang} onLoginSuccess={onLoginSuccess} />
           <InstallAppCard variant="customer" lang={lang} />
         </main>
       ) : view === "info" ? (
@@ -845,6 +1215,7 @@ export function App() {
                 <div className="logo-tile" style={{ width: 88, height: 88 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></div>
                 <h1 className="serif" style={{ fontSize: 32, marginTop: 10 }}>{settings.cafeName}</h1>
                 <p className={`muted ${taglineClass(lang)}`} style={{ fontSize: 20, fontWeight: 700 }}>{taglineText(settings, lang)}</p>
+                <div className="row" style={{ marginTop: 10 }}><OpenNowBadge settings={settings} lang={lang} /></div>
                 <p style={{ marginTop: 8 }}>{tr(lang, "Order from your phone — delivery, takeaway or dine-in. Prices follow the owner's printed menu.", "মোবাইল থেকে অর্ডার করুন — ডেলিভারি, টেকঅ্যাওয়ে বা ডাইন-ইন। দাম মালিকের ছাপা মেনু অনুযায়ী।")}</p>
                 <div className="row" style={{ marginTop: 12 }}>
                   <input aria-label={tr(lang, "Search menu", "মেনু খুঁজুন")} placeholder={tr(lang, "Search the menu…", "মেনু খুঁজুন…")} value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />
@@ -859,6 +1230,7 @@ export function App() {
           <AdSlotView slotId="home-banner" adsJson={settings.adsJson} />
           <BannerCarousel products={products} onSelect={(p) => setDetail(p)} lang={lang} />
           <InstallAppCard variant="customer" lang={lang} />
+          <OffersSection settings={settings} lang={lang} />
 
           <div className="row" style={{ marginTop: 18 }} role="tablist" aria-label="Categories">
             <button className={`chip ${cat === "all" ? "chip-on" : ""}`} onClick={() => setCat("all")}>{tr(lang, "All", "সব")}</button>
@@ -879,7 +1251,7 @@ export function App() {
                     <h3 style={{ margin: 0 }}>{displayName(p, lang)}</h3>
                     <p className="small muted" style={{ margin: "4px 0 0" }}>{p.description}</p>
                     <div className="row" style={{ marginTop: 6 }}>
-                      {p.bestSeller && <span className="chip" style={{ padding: "2px 7px", fontSize: 11 }}>★ {tr(lang, "Best seller", "বেস্ট সেলার")}</span>}
+                      {p.bestSeller && <span className="chip" style={{ padding: "3px 9px", fontSize: 12, fontWeight: 800, background: "var(--gold)", color: "#1a1207", borderColor: "transparent" }}>★ {tr(lang, "Popular", "জনপ্রিয়")}</span>}
                       {p.isNew && <span className="chip" style={{ padding: "2px 7px", fontSize: 11 }}>{tr(lang, "New", "নতুন")}</span>}
                     </div>
                   </div>
@@ -959,6 +1331,7 @@ export function App() {
         <button onClick={() => navigate("track")}>📦 {tr(lang, "Track", "ট্র্যাক")}</button>
         <button onClick={() => navigate("account")}>👤 {tr(lang, "Account", "অ্যাকাউন্ট")}</button>
       </nav>)}
+      {view !== "admin" && <ChatBox fbUser={fbUser} userDoc={userDoc} products={products} settings={settings} lang={lang} />}
       {/* No floating admin button on customer pages: the customer app
           carries no admin trace. Staff reach the panel via #/admin. */}
       {cart.length > 0 && view === "store" && !cartOpen && (

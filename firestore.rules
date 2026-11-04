@@ -72,9 +72,17 @@ service cloud.firestore {
     // Catalog + settings + coupons: public read; only admins write.
     // The customer site reads these live, so every admin edit here
     // controls the customer panel at once — there is no second copy.
+    // One exception: cancelling an order gives its stock back, so a
+    // signed-in user may INCREASE a product's stock (and change
+    // nothing else). Decreasing stock, or touching any other field,
+    // stays admin-only — an inflated stock can only ever come from a
+    // real cancellation, and the admin sees every cancellation live.
     match /products/{id} {
       allow read: if true;
       allow create, update, delete: if isAdmin();
+      allow update: if signedIn()
+        && changedKeys().hasOnly(['stock'])
+        && request.resource.data.stock > resource.data.stock;
     }
     match /categories/{id} {
       allow read: if true;
@@ -92,7 +100,12 @@ service cloud.firestore {
     // Orders: customers create only their own orders, always Pending /
     // Unpaid. Staff read all; only staff change status; only
     // admin/manager change payment status; totals and items are never
-    // editable after creation.
+    // editable after creation. One exception: the customer who owns an
+    // order may cancel it themselves — status only, Pending/Confirmed
+    // only, and only inside the cancel window from the admin
+    // settings (settings/cafe cancelWindowMinutes, default 2 min).
+    // The window is read from the settings document so the admin can
+    // change it without touching the rules.
     match /orders/{id} {
       allow read: if isOwner(resource.data.userId) || isStaff();
       allow create: if signedIn()
@@ -103,6 +116,12 @@ service cloud.firestore {
       allow update: if isStaff()
         && !changedKeys().hasAny(['total', 'subtotal', 'discount', 'vat', 'deliveryFee', 'items', 'userId'])
         && !(changedKeys().hasAny(['paymentStatus']) && !isManager());
+      allow update: if isOwner(resource.data.userId)
+        && changedKeys().hasOnly(['status'])
+        && request.resource.data.status == 'Cancelled'
+        && resource.data.status in ['Pending', 'Confirmed']
+        && request.time - resource.data.createdAt <= duration.value(
+          get(/databases/$(database)/documents/settings/cafe).data.get('cancelWindowMinutes', 2), 'm');
       allow delete: if false;
     }
 
@@ -115,9 +134,18 @@ service cloud.firestore {
     }
 
     // Private messages: the customer who owns the thread and staff only.
+    // Messages (in-app chatbox): a customer reads/writes only their
+    // own thread; staff read all threads and reply in any thread.
+    // The AI assistant's replies are written by the customer's own
+    // browser with author "ai" — allowed in their own thread only.
+    // A customer may never forge a staff message.
     match /messages/{id} {
       allow read: if isOwner(resource.data.userId) || isStaff();
-      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.author in ['customer', 'ai'];
+      allow create: if isStaff()
+        && request.resource.data.author == 'staff';
       allow update: if isStaff();
       allow delete: if false;
     }

@@ -19,7 +19,7 @@ import {
   type Timestamp,
 } from "firebase/firestore";
 import { getDb } from "./firebase";
-import { SEED_CATEGORIES, SEED_PRODUCTS, DEFAULT_SETTINGS } from "./seed";
+import { SEED_CATEGORIES, SEED_PRODUCTS, SEED_COUPONS, DEFAULT_SETTINGS } from "./seed";
 
 export type Lang = "bn" | "en";
 export const tr = (lang: Lang, en: string, bn: string) => (lang === "bn" ? bn : en);
@@ -45,18 +45,32 @@ export type Settings = {
   bkashNumber: string; nagadNumber: string; rocketNumber: string; paymentNote: string;
   adsJson: string; hoursJson: string; zonesJson: string; paymentsJson: string; contentJson: string;
   promoVideo: string; bannersJson: string; loyaltyPerAmount: number; loyaltyRedeemPoints: number; loyaltyRedeemValue: number;
+  // Offer controls — every tunable value lives here so the owner can
+  // change it from the admin Settings form, never from code.
+  comboMinQty: number; comboDiscount: number;
+  happyHourStart: string; happyHourEnd: string; happyHourPercent: number;
+  cancelWindowMinutes: number;
+  // Phone trust score: a number's cancel rate at/above riskRiskyPct
+  // is "Risky", at/above riskCautionPct is "Caution", else "Good".
+  riskCautionPct: number; riskRiskyPct: number;
+  // Gemini API key for the AI assistant inside the customer chatbox.
+  // The parent/user pastes it here; it must be restricted in Google
+  // Cloud Console to the cafe's own domain (cafe-reza.web.app) first.
+  geminiApiKey: string;
 };
-export type Coupon = { id: string; code: string; kind: string; value: number; minPurchase: number; maxDiscount: number | null; usageLimit: number | null; usedCount: number; active: boolean; expiresAt: string; description: string };
+export type Coupon = { id: string; code: string; kind: string; value: number; minPurchase: number; maxDiscount: number | null; usageLimit: number | null; usedCount: number; active: boolean; expiresAt: string; description: string; firstOrderOnly?: boolean };
 export type OrderItem = { productId: string; name: string; qty: number; price: number; size: string; note: string };
+export type DiscountBreakdown = { coupon: number; combo: number; happyHour: number; loyalty: number };
 export type Order = {
   id: string; orderNo: string; userId: string | null; customerName: string; phone: string; address: string;
   orderType: string; source: string; status: string; paymentMethod: string; paymentStatus: string; paymentRef: string;
   subtotal: number; discount: number; vat: number; deliveryFee: number; total: number;
+  discountBreakdown: DiscountBreakdown | null;
   paidAmount: number; changeAmount: number; tableLabel: string; notes: string; staffName: string;
   items: OrderItem[]; couponCode: string; createdAt: string;
 };
 export type Reservation = { id: string; name: string; phone: string; email: string; date: string; time: string; guests: number; requests: string; status: string; tableLabel: string; userId: string; createdAt: string };
-export type UserDoc = { id: string; name: string; email: string; phone: string; role: string; status: string; loyaltyPoints: number; tier: string; addresses: string[]; wishlist: string[]; createdAt: string };
+export type UserDoc = { id: string; name: string; email: string; phone: string; role: string; status: string; loyaltyPoints: number; tier: string; orderCount: number; addresses: string[]; wishlist: string[]; createdAt: string };
 export type MessageDoc = { id: string; userId: string; guestName: string; guestPhone: string; orderNo: string; author: string; authorName: string; body: string; readFlag: boolean; createdAt: string };
 export type Ticket = { id: string; userId: string; name: string; phone: string; category: string; priority: string; status: string; message: string; reply: string; createdAt: string };
 export type Review = { id: string; productId: string; author: string; rating: number; comment: string; status: string; createdAt: string };
@@ -125,6 +139,7 @@ export function categoryFromDoc(id: string, d: DocumentData): Category {
 export function orderFromDoc(id: string, d: DocumentData): Order {
   const o = d as Partial<Order> & { createdAt?: unknown };
   const items = Array.isArray(o.items) ? (o.items as OrderItem[]) : [];
+  const bd = o.discountBreakdown as DiscountBreakdown | undefined;
   return {
     id, orderNo: o.orderNo ?? id.slice(0, 8).toUpperCase(), userId: o.userId ?? null,
     customerName: o.customerName ?? "", phone: o.phone ?? "", address: o.address ?? "",
@@ -132,6 +147,7 @@ export function orderFromDoc(id: string, d: DocumentData): Order {
     paymentMethod: o.paymentMethod ?? "Cash on Delivery", paymentStatus: o.paymentStatus ?? "Unpaid",
     paymentRef: o.paymentRef ?? "", subtotal: Number(o.subtotal ?? 0), discount: Number(o.discount ?? 0),
     vat: Number(o.vat ?? 0), deliveryFee: Number(o.deliveryFee ?? 0), total: Number(o.total ?? 0),
+    discountBreakdown: bd ? { coupon: Number(bd.coupon ?? 0), combo: Number(bd.combo ?? 0), happyHour: Number(bd.happyHour ?? 0), loyalty: Number(bd.loyalty ?? 0) } : null,
     paidAmount: Number(o.paidAmount ?? 0), changeAmount: Number(o.changeAmount ?? 0),
     tableLabel: o.tableLabel ?? "", notes: o.notes ?? "", staffName: o.staffName ?? "",
     items, couponCode: o.couponCode ?? "", createdAt: tsToIso(o.createdAt),
@@ -147,6 +163,7 @@ export function userFromDoc(id: string, d: DocumentData): UserDoc {
   return {
     id, name: u.name ?? "", email: u.email ?? "", phone: u.phone ?? "", role: u.role ?? "customer",
     status: u.status ?? "active", loyaltyPoints: Number(u.loyaltyPoints ?? 0), tier: u.tier ?? "Bronze",
+    orderCount: Number(u.orderCount ?? 0),
     addresses: Array.isArray(u.addresses) ? (u.addresses as string[]) : [],
     wishlist: Array.isArray(u.wishlist) ? (u.wishlist as string[]) : [],
     createdAt: tsToIso(u.createdAt),
@@ -193,6 +210,15 @@ export async function seedCatalog(): Promise<{ inserted: number; categories: num
     });
     const settingsSnap = await getDocs(query(collection(firestore, "settings"), where("__name__", "==", "cafe"), limit(1)));
     if (settingsSnap.empty) batch.set(doc(firestore, "settings", "cafe"), { ...DEFAULT_SETTINGS, updatedAt: serverTimestamp() });
+    // Welcome coupon: only when it does not already exist, so an
+    // admin-edited coupon is never overwritten.
+    const existingCoupons = await getDocs(collection(firestore, "coupons"));
+    const couponCodes = new Set(existingCoupons.docs.map((d) => d.id));
+    for (const c of SEED_COUPONS) {
+      if (!couponCodes.has(c.code)) {
+        batch.set(doc(firestore, "coupons", c.code), { ...c, usedCount: 0 });
+      }
+    }
     // Default tables so the Tables & Reservations tab is never an empty
     // list on a fresh setup; the owner can rename, add or delete them.
     const existingTables = await getDocs(collection(firestore, "tables"));

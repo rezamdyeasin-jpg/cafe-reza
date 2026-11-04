@@ -6,23 +6,40 @@
 // separate sign-in screen, and a customer account opening #/admin sees
 // only the access-denied card below. Staff roles are read from the
 // /users/{uid} document; only an admin writes catalog and settings.
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useMemo, useState, type FormEvent } from "react";
 import type { User } from "firebase/auth";
 import {
   addDoc, collection, deleteDoc, doc, getDocs, limit, orderBy, query,
-  serverTimestamp, setDoc, updateDoc, where,
+  serverTimestamp, setDoc, updateDoc, where, writeBatch,
 } from "firebase/firestore";
 import { getDb, probeFirestore, signOutUser } from "./firebase";
 import { BANNER_SLIDES, CUSTOMER_EMAIL, OWNER_EMAIL, SEED_PRODUCTS } from "./seed";
 import {
   AD_SLOT_DEFS, expenseFromDoc, isStaffRole, orderFromDoc, ORDER_STATUSES, parseAds, parseBannerSelection, parseContent,
-  tr, useLive, userFromDoc,
+  tr, tsToIso, useLive, userFromDoc,
   type Category, type Coupon, type Expense, type Lang, type Order, type Product, type Reservation, type Settings, type UserDoc,
 } from "./db";
-import { placeOrderTx } from "./orders";
+import { cancelOrderTx, comboDiscount, COMBO_DISCOUNT_PER_LINE, COMBO_MIN_QTY, HAPPY_HOUR_END, HAPPY_HOUR_PERCENT, HAPPY_HOUR_START, happyHourDiscount, placeOrderTx, timeToMin } from "./orders";
 import { InstallAppCard } from "./InstallAppCard";
+import { DigitalAnalyzer } from "./DigitalAnalyzer";
+import { ReceiptModal } from "./Receipt";
+import { computePhoneStats, normalizePhone, phoneQueryVariants, trustColor, trustLabel, trustLevel, type PhoneStats } from "./phoneTrust";
 
 const tk = (n: number) => `৳${n.toLocaleString("en-US")}`;
+
+// Phone trust badge: the number's cancel rate from real orders, with
+// the trust label from the admin's thresholds (Settings → risk*Pct).
+// No badge at all when the number has no order history.
+function PhoneTrustBadge({ stats, settings, lang }: { stats: PhoneStats | undefined; settings: Settings; lang: Lang }) {
+  if (!stats || stats.total === 0) return null;
+  const level = trustLevel(stats.cancelRate, settings.riskCautionPct ?? 25, settings.riskRiskyPct ?? 50);
+  const color = trustColor(level);
+  return (
+    <span className="chip" style={{ border: `2px solid ${color}`, color, fontWeight: 700, padding: "2px 8px" }} title={tr(lang, `Orders: ${stats.total}, completed: ${stats.completed}, cancelled: ${stats.cancelled}, refunded: ${stats.refunded}`, `অর্ডার: ${stats.total}, সম্পন্ন: ${stats.completed}, বাতিল: ${stats.cancelled}, ফেরত: ${stats.refunded}`)}>
+      {level === "risky" ? "⚠ " : ""}{trustLabel(level, lang)} • {tr(lang, "cancel", "বাতিল")} {Math.round(stats.cancelRate)}% ({stats.cancelled}/{stats.total})
+    </span>
+  );
+}
 const IMG_FILES = [...new Set([...SEED_PRODUCTS.map((p) => p.img), ...SEED_PRODUCTS.map((p) => p.img2), ...BANNER_SLIDES.map((b) => b.img), "hero.jpg", "logo.jpg", "tray.jpg", "tray2.jpg", "menu-photo.jpg"])].sort();
 const STAFF_ROLES = ["admin", "manager", "cashier", "kitchen", "waiter", "delivery", "inventory"];
 const PAYMENTS = ["Cash on Delivery", "Cash at Counter", "Cash", "bKash", "Nagad", "Rocket", "Bank Transfer"];
@@ -71,11 +88,41 @@ const fmtDate = (raw: string) => {
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
 };
 
-function OrdersTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Product[]; lang: Lang }) {
+function OrdersTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; products: Product[]; settings: Settings; lang: Lang }) {
   const firestore = getDb();
   const { data: orders } = useLive<Order>(() => (firestore ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(60)) : null), orderFromDoc);
+  // Trust stats come from a wider recent window (200 orders) than the
+  // 60 shown here, so a number's history is judged on more than the
+  // few orders on screen. The lookup below reads the full history.
+  const { data: statsOrders } = useLive<Order>(() => (firestore ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(200)) : null), orderFromDoc);
+  const phoneStats = useMemo(() => computePhoneStats(statsOrders), [statsOrders]);
   const [note, setNote] = useState("");
   const [refundReason, setRefundReason] = useState("");
+  const [receiptOrder, setReceiptOrder] = useState<Order | null>(null);
+  const [lookupInput, setLookupInput] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupMsg, setLookupMsg] = useState("");
+  const [lookupResult, setLookupResult] = useState<{ stats: PhoneStats; orders: Order[] } | null>(null);
+  // Full history for one number: tries every stored form of the
+  // number (+880…, 880…, 01…), then keeps only the orders whose
+  // normalized number matches — all from real order documents.
+  const lookupPhone = async () => {
+    if (!firestore || !lookupInput.trim()) return;
+    setLookupBusy(true); setLookupMsg(""); setLookupResult(null);
+    try {
+      const norm = normalizePhone(lookupInput.trim());
+      const snap = await getDocs(query(collection(firestore, "orders"), where("phone", "in", phoneQueryVariants(lookupInput.trim()))));
+      const found = snap.docs.map((d) => orderFromDoc(d.id, d.data())).filter((o) => normalizePhone(o.phone ?? "") === norm);
+      if (found.length === 0) { setLookupMsg(tr(lang, "No orders found for this number.", "এই নম্বরে কোনো অর্ডার পাওয়া যায়নি।")); return; }
+      const map = computePhoneStats(found);
+      const stats = map.get(norm);
+      if (!stats) { setLookupMsg(tr(lang, "No orders found for this number.", "এই নম্বরে কোনো অর্ডার পাওয়া যায়নি।")); return; }
+      setLookupResult({ stats, orders: [...found].sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
+    } catch (e) {
+      setLookupMsg(e instanceof Error ? e.message : String(e));
+    }
+    setLookupBusy(false);
+  };
   const setStatus = async (o: Order, status: string) => {
     if (!firestore || status === o.status) return;
     // Cancelling / refunding is destructive and was one accidental tap
@@ -84,6 +131,17 @@ function OrdersTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Pr
     if (status === "Cancelled" || status === "Refunded") {
       const ok = window.confirm(tr(lang, `Change ${o.orderNo} to ${status}? This cannot be undone from here.`, `${o.orderNo}-এর অবস্থা ${status === "Cancelled" ? "বাতিল" : "ফেরত"} করবেন? এটা এখান থেকে ফেরানো যাবে না।`));
       if (!ok) return;
+    }
+    // Cancelling goes through the same transaction as the customer
+    // cancel button, so the items go back to stock — a plain status
+    // write would leave the stock short, which is what the old code
+    // did (the policy text already promised the stock back).
+    if (status === "Cancelled") {
+      const r = await cancelOrderTx({ uid: userDoc.id, orderId: o.id, cancelWindowMinutes: settings.cancelWindowMinutes ?? 2, isStaff: true });
+      if (!r.ok) { setNote(r.error ?? tr(lang, "Could not cancel the order.", "অর্ডার বাতিল করা যায়নি।")); return; }
+      audit(userDoc, "order.status", `${o.orderNo} → Cancelled (stock restored)`);
+      setNote(tr(lang, `${o.orderNo} cancelled — the items are back in stock.`, `${o.orderNo} বাতিল হয়েছে — আইটেমগুলো স্টকে ফিরে গেছে।`));
+      return;
     }
     await updateDoc(doc(firestore, "orders", o.id), { status });
     audit(userDoc, "order.status", `${o.orderNo} → ${status}`);
@@ -113,20 +171,49 @@ function OrdersTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Pr
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Live Orders / Kitchen", "লাইভ অর্ডার / কিচেন")}</h3>
       <p className="small"><span style={{ color: "var(--good)" }}>● {tr(lang, "LIVE", "লাইভ")}</span> — {tr(lang, "New orders appear here the moment they arrive.", "নতুন অর্ডার আসার সঙ্গে সঙ্গে এখানে দেখা যাবে।")} {orders.filter((o) => o.status === "Pending").length} {tr(lang, "pending", "টি অপেক্ষমাণ")}</p>
       {note && <p className="small" role="status">{note}</p>}
+      <div className="card" style={{ padding: 12, marginTop: 10 }}>
+        <b>{tr(lang, "Phone number lookup", "ফোন নম্বর খুঁজুন")}</b>
+        <p className="small muted" style={{ margin: "4px 0 8px" }}>{tr(lang, "Type a number to see its full order history and trust score — from real orders, however the number was typed at checkout.", "একটা নম্বর লিখে তার পুরো অর্ডারের ইতিহাস ও ট্রাস্ট স্কোর দেখুন — আসল অর্ডার থেকে, চেকআউটে নম্বর যেভাবেই লেখা হোক।")}</p>
+        <div className="row">
+          <input aria-label={tr(lang, "Phone number to look up", "খুঁজতে ফোন নম্বর")} value={lookupInput} onChange={(e) => setLookupInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void lookupPhone(); }} placeholder="01XXXXXXXXX" style={{ flex: 1 }} />
+          <button className="btn-gold" disabled={lookupBusy || !lookupInput.trim()} onClick={() => void lookupPhone()}>{lookupBusy ? tr(lang, "Searching…", "খুঁজছি…") : tr(lang, "Search", "খুঁজুন")}</button>
+        </div>
+        {lookupMsg && <p className="small" role="status" style={{ marginTop: 8 }}>{lookupMsg}</p>}
+        {lookupResult && (
+          <div style={{ marginTop: 10 }}>
+            <p style={{ margin: 0 }}><b>{lookupResult.stats.phone}</b> <PhoneTrustBadge stats={lookupResult.stats} settings={settings} lang={lang} /></p>
+            <p className="small" style={{ margin: "6px 0 0" }}>
+              {tr(lang, "Total orders:", "মোট অর্ডার:")} <b>{lookupResult.stats.total}</b> •
+              {" "}{tr(lang, "Completed:", "সম্পন্ন:")} <b>{lookupResult.stats.completed}</b> •
+              {" "}{tr(lang, "Cancelled:", "বাতিল:")} <b>{lookupResult.stats.cancelled} ({Math.round(lookupResult.stats.cancelRate)}%)</b> •
+              {" "}{tr(lang, "Refunded:", "ফেরত:")} <b>{lookupResult.stats.refunded} ({Math.round(lookupResult.stats.returnRate)}%)</b>
+            </p>
+            <ul className="small" style={{ marginTop: 6 }}>{lookupResult.orders.slice(0, 20).map((o) => <li key={o.id}>{o.orderNo} • {o.status} • {tk(o.total)} • {o.createdAt ? new Date(o.createdAt).toLocaleDateString("en-GB") : ""}</li>)}</ul>
+          </div>
+        )}
+      </div>
       <label>{tr(lang, "Refund reason (for the button below)", "ফেরতের কারণ (নিচের বোতামের জন্য)")}<input aria-label="Refund reason" value={refundReason} onChange={(e) => setRefundReason(e.target.value)} /></label>
       {orders.length === 0 && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
-      {orders.map((o) => (
-        <div key={o.id} className="card" style={{ padding: 12, marginTop: 10 }}>
+      {orders.map((o) => {
+        const st = phoneStats.get(normalizePhone(o.phone ?? ""));
+        const lvl = st ? trustLevel(st.cancelRate, settings.riskCautionPct ?? 25, settings.riskRiskyPct ?? 50) : null;
+        return (
+        <div key={o.id} className="card" style={{ padding: 12, marginTop: 10, border: lvl === "risky" ? "2px solid var(--bad)" : undefined }}>
           <div className="row" style={{ justifyContent: "space-between" }}><b>{o.orderNo}</b><span>{tk(o.total)} • {o.paymentStatus}</span></div>
           <p className="small muted">{o.customerName} • {o.phone} • {o.orderType} • {o.source} • {o.createdAt ? new Date(o.createdAt).toLocaleString("en-GB") : ""}</p>
+          {st && <p style={{ margin: "4px 0 0" }}><PhoneTrustBadge stats={st} settings={settings} lang={lang} /></p>}
+          {lvl === "risky" && <p className="small" style={{ color: "var(--bad)", fontWeight: 700, margin: "4px 0 0" }}>⚠ {tr(lang, "Warning: this number cancels often — confirm the order by phone before preparing it.", "সতর্কতা: এই নম্বর থেকে প্রায়ই বাতিল হয় — তৈরি করার আগে ফোনে অর্ডারটি নিশ্চিত করুন।")}</p>}
           <ul className="small">{o.items.map((it, i) => <li key={i}>{it.qty} × {itemName(products, it, lang)} — {tk(it.price)}</li>)}</ul>
           <div className="row" style={{ marginTop: 8 }}>
             <label style={{ margin: 0 }}>{tr(lang, "Status", "অবস্থা")}<select aria-label={`Status for ${o.orderNo}`} value={o.status} onChange={(e) => void setStatus(o, e.target.value)}>{["Pending", "Confirmed", "Preparing", "Ready", "Out for Delivery", "Delivered", "Completed", "Cancelled", "Refunded"].map((s) => <option key={s}>{s}</option>)}</select></label>
             {o.paymentStatus === "Pending verification" && <button className="btn-gold" onClick={() => void verifyPayment(o)}>{tr(lang, "Verify payment (manual)", "পেমেন্ট যাচাই করুন (ম্যানুয়াল)")}</button>}
             <button className="btn-ghost" onClick={() => void requestRefund(o)}>{tr(lang, "Request refund", "ফেরতের অনুরোধ")}</button>
+            <button className="btn-ghost" onClick={() => setReceiptOrder(o)}>🧾 {tr(lang, "Receipt", "রিসিট")}</button>
           </div>
         </div>
-      ))}
+        );
+      })}
+      {receiptOrder && <ReceiptModal order={receiptOrder} settings={settings} products={products} lang={lang} onClose={() => setReceiptOrder(null)} />}
       <RefundDecisions userDoc={userDoc} products={products} lang={lang} />
     </div>
   );
@@ -166,13 +253,19 @@ function PosTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; produ
   const [cashText, setCashText] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saleReceipt, setSaleReceipt] = useState<Order | null>(null);
+  const [showReceipt, setShowReceipt] = useState(false);
   const cash = Number(cashText) || 0;
   const qtyBySlug = new Map(cart.map((c) => [c.slug, c.qty]));
   const lines = cart.map((c) => ({ product: products.find((p) => p.slug === c.slug), qty: c.qty })).filter((l): l is { product: Product; qty: number } => !!l.product);
   // Excel-style live formulas: line = qty x unit price, total = sum of
-  // lines, change = cash - total. Nothing is typed twice; every number
+  // lines minus the combo discount (same helper as the website cart),
+  // change = cash - total. Nothing is typed twice; every number
   // updates the moment a quantity changes.
-  const total = lines.reduce((a, l) => a + (l.product.discountPrice ?? l.product.price) * l.qty, 0);
+  const subtotal = lines.reduce((a, l) => a + (l.product.discountPrice ?? l.product.price) * l.qty, 0);
+  const combo = comboDiscount(lines.map((l) => ({ qty: l.qty })), settings.comboMinQty ?? COMBO_MIN_QTY, settings.comboDiscount ?? COMBO_DISCOUNT_PER_LINE);
+  const happy = happyHourDiscount(subtotal, new Date(), timeToMin(settings.happyHourStart ?? HAPPY_HOUR_START), timeToMin(settings.happyHourEnd ?? HAPPY_HOUR_END), settings.happyHourPercent ?? HAPPY_HOUR_PERCENT);
+  const total = Math.max(0, subtotal - combo - happy);
   const change = Math.max(0, cash - total);
   const inc = (slug: string) => setCart((prev) => { const cur = prev.find((c) => c.slug === slug); return cur ? prev.map((c) => (c.slug === slug ? { ...c, qty: c.qty + 1 } : c)) : [...prev, { slug, qty: 1 }]; });
   const dec = (slug: string) => setCart((prev) => { const cur = prev.find((c) => c.slug === slug); if (!cur) return prev; return cur.qty <= 1 ? prev.filter((c) => c.slug !== slug) : prev.map((c) => (c.slug === slug ? { ...c, qty: c.qty - 1 } : c)); });
@@ -189,7 +282,10 @@ function PosTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; produ
     });
     setBusy(false);
     if (!r.ok) { setMsg(r.error ?? "Sale failed."); return; }
-    setMsg(tr(lang, `Sale done: ${r.orderNo}. Change: ${tk(change)}.`, `বিক্রি হয়েছে: ${r.orderNo}। ফেরত: ${tk(change)}।`));
+    const charged = r.total ?? total;
+    const changeDue = Math.max(0, cash - charged);
+    setMsg(tr(lang, `Sale done: ${r.orderNo}. Total: ${tk(charged)}. Change: ${tk(changeDue)}.`, `বিক্রি হয়েছে: ${r.orderNo}। মোট: ${tk(charged)}। ফেরত: ${tk(changeDue)}।`));
+    setSaleReceipt(r.receipt ?? null);
     setCart([]); setCashText("");
   };
   return (
@@ -226,12 +322,17 @@ function PosTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; produ
               </div>
             );
           })}
+          <p><b>{tr(lang, "Subtotal", "সাবটোটাল")}: {tk(subtotal)}</b></p>
+          {combo > 0 && <p style={{ color: "var(--good)", fontWeight: 700 }}>{tr(lang, "Combo discount", "কম্বো ছাড়")}: −{tk(combo)}</p>}
+          {happy > 0 && <p style={{ color: "var(--good)", fontWeight: 700 }}>{tr(lang, "Happy Hour discount", "হ্যাপি আওয়ার ছাড়")} ({settings.happyHourPercent ?? HAPPY_HOUR_PERCENT}%): −{tk(happy)}</p>}
           <p><b>{tr(lang, "Total", "মোট")}: {tk(total)}</b></p>
           <label>{tr(lang, "Cash received", "পাওয়া টাকা")}<input aria-label="Cash received" type="number" value={cashText} onChange={(e) => setCashText(e.target.value)} /></label>
           <p>{tr(lang, "Change:", "ফেরত:")} <b>{tk(change)}</b></p>
           <button className="btn-gold" disabled={busy || lines.length === 0} onClick={() => void sell()}>{tr(lang, "Complete cash sale", "নগদ বিক্রি সম্পন্ন করুন")}</button>
           <button className="btn-ghost" style={{ marginLeft: 8 }} onClick={() => { setCart([]); setCashText(""); }}>{tr(lang, "Clear all", "সব মুছুন")}</button>
           {msg && <p className="small" role="status">{msg}</p>}
+          {saleReceipt && <button className="btn-ghost" style={{ marginTop: 8 }} onClick={() => setShowReceipt(true)}>🧾 {tr(lang, "Receipt for the last sale", "শেষ বিক্রির রিসিট")}</button>}
+          {showReceipt && saleReceipt && <ReceiptModal order={saleReceipt} settings={settings} products={products} lang={lang} onClose={() => setShowReceipt(false)} />}
         </div>
       </div>
     </div>
@@ -245,6 +346,10 @@ function ProductsTab({ userDoc, categories, products, lang }: { userDoc: UserDoc
   const [catForm, setCatForm] = useState({ id: "", nameEn: "", nameBn: "", sortOrder: 99, active: true });
   const [msg, setMsg] = useState("");
   const startEdit = (p: Product) => {
+    // Toggle: tapping Edit on the row that is already open closes it.
+    // Opening another row closes the first one — only one inline
+    // editor is ever open, and it always sits directly under its row.
+    if (editing?.slug === p.slug) { setEditing(null); setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", sortOrder: 1 }); return; }
     setEditing(p);
     setForm({ slug: p.slug, nameEn: p.nameEn, nameBn: p.nameBn, description: p.description, categoryId: p.categoryId, price: p.price, discountPrice: p.discountPrice == null ? "" : String(p.discountPrice), stock: p.stock, available: p.available, featured: p.featured, bestSeller: p.bestSeller, isNew: p.isNew, imageKey: p.imageKey ?? "", imageKey2: p.imageKey2 ?? "", ingredients: p.ingredients, sortOrder: p.sortOrder });
   };
@@ -258,6 +363,7 @@ function ProductsTab({ userDoc, categories, products, lang }: { userDoc: UserDoc
     audit(userDoc, editing ? "product.update" : "product.create", `${data.nameEn} — price ${data.price}`);
     setMsg(tr(lang, "Product saved — the customer menu updates at once.", "প্রোডাক্ট সংরক্ষিত হয়েছে — কাস্টমার মেনু সাথে সাথে বদলে যাবে।"));
     setEditing(null);
+    setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", sortOrder: 1 });
   };
   const remove = async (p: Product) => {
     if (!firestore) return;
@@ -273,37 +379,57 @@ function ProductsTab({ userDoc, categories, products, lang }: { userDoc: UserDoc
     setCatForm({ id: "", nameEn: "", nameBn: "", sortOrder: 99, active: true });
     setMsg(tr(lang, "Category saved.", "ক্যাটাগরি সংরক্ষিত হয়েছে।"));
   };
+  // The one product form, used in two places: at the top for a new
+  // product, and inline directly under the row being edited. Only one
+  // copy is ever on screen, so the shared `form` state never clashes.
+  const renderProductForm = () => (
+    <form onSubmit={(e) => void save(e)} className="card" style={{ padding: 14, marginTop: 10 }}>
+      <b>{editing ? tr(lang, "Edit product", "প্রোডাক্ট সম্পাদনা") : tr(lang, "New product", "নতুন প্রোডাক্ট")}</b>
+      <label>{tr(lang, "Slug (Firestore document id)", "স্লাগ (Firestore ডকুমেন্ট আইডি)")}<input aria-label="Product slug" value={form.slug} disabled={!!editing} onChange={(e) => setForm({ ...form, slug: e.target.value })} /></label>
+      <label>{tr(lang, "Name (English)", "নাম (ইংরেজি)")}<input aria-label="Product name English" required value={form.nameEn} onChange={(e) => setForm({ ...form, nameEn: e.target.value })} /></label>
+      <label>{tr(lang, "Name (Bengali)", "নাম (বাংলা)")}<input aria-label="Product name Bengali" value={form.nameBn} onChange={(e) => setForm({ ...form, nameBn: e.target.value })} /></label>
+      <label>{tr(lang, "Description", "বিবরণ")}<input aria-label="Product description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
+      <label>{tr(lang, "Category", "ক্যাটাগরি")}<select aria-label="Product category" value={form.categoryId} onChange={(e) => setForm({ ...form, categoryId: e.target.value })}><option value="">{tr(lang, "Choose…", "বেছে নিন…")}</option>{categories.map((c) => <option key={c.id} value={c.id}>{displayCategoryName(c, lang)}</option>)}</select></label>
+      <div className="row">
+        <label style={{ flex: 1 }}>{tr(lang, "Price (৳, 0 = not set yet)", "দাম (৳, ০ = এখনো বসানো হয়নি)")}<input aria-label="Price" type="number" min={0} value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} /></label>
+        <label style={{ flex: 1 }}>{tr(lang, "Discount price (empty = none)", "ছাড়ের দাম (খালি = নেই)")}<input aria-label="Discount price" type="number" min={0} value={form.discountPrice} onChange={(e) => setForm({ ...form, discountPrice: e.target.value })} /></label>
+        <label style={{ flex: 1 }}>{tr(lang, "Stock", "স্টক")}<input aria-label="Stock" type="number" min={0} value={form.stock} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} /></label>
+      </div>
+      <label>{tr(lang, "Photo file", "ছবির ফাইল")}<select aria-label="Photo file" value={form.imageKey} onChange={(e) => setForm({ ...form, imageKey: e.target.value })}><option value="">{tr(lang, "No photo", "ছবি নেই")}</option>{IMG_FILES.map((f) => <option key={f} value={f}>{f}</option>)}</select></label>
+      <label>{tr(lang, "Second photo file", "দ্বিতীয় ছবির ফাইল")}<select aria-label="Second photo file" value={form.imageKey2} onChange={(e) => setForm({ ...form, imageKey2: e.target.value })}><option value="">{tr(lang, "Same as photo", "ছবির মতোই")}</option>{IMG_FILES.map((f) => <option key={f} value={f}>{f}</option>)}</select></label>
+      <label>{tr(lang, "Ingredients (comma separated)", "উপকরণ (কমা দিয়ে)")}<input aria-label="Ingredients" value={form.ingredients} onChange={(e) => setForm({ ...form, ingredients: e.target.value })} /></label>
+      <div className="row">
+        {(["available", "featured", "bestSeller", "isNew"] as const).map((k) => <label key={k} style={{ display: "flex", gap: 6, alignItems: "center", margin: 0 }}><input type="checkbox" checked={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.checked })} style={{ width: "auto" }} />{k}</label>)}
+      </div>
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="btn-gold" type="submit">{tr(lang, "Save product", "প্রোডাক্ট সংরক্ষণ করুন")}</button>
+        {editing && <button className="btn-ghost" type="button" onClick={() => { setEditing(null); setForm({ slug: "", nameEn: "", nameBn: "", description: "", categoryId: "", price: 0, discountPrice: "", stock: 100, available: true, featured: false, bestSeller: false, isNew: false, imageKey: "", imageKey2: "", ingredients: "", sortOrder: 1 }); }}>{tr(lang, "Cancel edit", "সম্পাদনা বাতিল")}</button>}
+      </div>
+    </form>
+  );
   return (
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Products & Categories", "প্রোডাক্ট ও ক্যাটাগরি")}</h3>
       {msg && <p className="small" role="status">{msg}</p>}
-      <form onSubmit={(e) => void save(e)} className="card" style={{ padding: 14, marginTop: 10 }}>
-        <b>{editing ? tr(lang, "Edit product", "প্রোডাক্ট সম্পাদনা") : tr(lang, "New product", "নতুন প্রোডাক্ট")}</b>
-        <label>{tr(lang, "Slug (Firestore document id)", "স্লাগ (Firestore ডকুমেন্ট আইডি)")}<input aria-label="Product slug" value={form.slug} disabled={!!editing} onChange={(e) => setForm({ ...form, slug: e.target.value })} /></label>
-        <label>{tr(lang, "Name (English)", "নাম (ইংরেজি)")}<input aria-label="Product name English" required value={form.nameEn} onChange={(e) => setForm({ ...form, nameEn: e.target.value })} /></label>
-        <label>{tr(lang, "Name (Bengali)", "নাম (বাংলা)")}<input aria-label="Product name Bengali" value={form.nameBn} onChange={(e) => setForm({ ...form, nameBn: e.target.value })} /></label>
-        <label>{tr(lang, "Description", "বিবরণ")}<input aria-label="Product description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
-        <label>{tr(lang, "Category", "ক্যাটাগরি")}<select aria-label="Product category" value={form.categoryId} onChange={(e) => setForm({ ...form, categoryId: e.target.value })}><option value="">{tr(lang, "Choose…", "বেছে নিন…")}</option>{categories.map((c) => <option key={c.id} value={c.id}>{displayCategoryName(c, lang)}</option>)}</select></label>
-        <div className="row">
-          <label style={{ flex: 1 }}>{tr(lang, "Price (৳, 0 = not set yet)", "দাম (৳, ০ = এখনো বসানো হয়নি)")}<input aria-label="Price" type="number" min={0} value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} /></label>
-          <label style={{ flex: 1 }}>{tr(lang, "Discount price (empty = none)", "ছাড়ের দাম (খালি = নেই)")}<input aria-label="Discount price" type="number" min={0} value={form.discountPrice} onChange={(e) => setForm({ ...form, discountPrice: e.target.value })} /></label>
-          <label style={{ flex: 1 }}>{tr(lang, "Stock", "স্টক")}<input aria-label="Stock" type="number" min={0} value={form.stock} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} /></label>
-        </div>
-        <label>{tr(lang, "Photo file", "ছবির ফাইল")}<select aria-label="Photo file" value={form.imageKey} onChange={(e) => setForm({ ...form, imageKey: e.target.value })}><option value="">{tr(lang, "No photo", "ছবি নেই")}</option>{IMG_FILES.map((f) => <option key={f} value={f}>{f}</option>)}</select></label>
-        <label>{tr(lang, "Second photo file", "দ্বিতীয় ছবির ফাইল")}<select aria-label="Second photo file" value={form.imageKey2} onChange={(e) => setForm({ ...form, imageKey2: e.target.value })}><option value="">{tr(lang, "Same as photo", "ছবির মতোই")}</option>{IMG_FILES.map((f) => <option key={f} value={f}>{f}</option>)}</select></label>
-        <label>{tr(lang, "Ingredients (comma separated)", "উপকরণ (কমা দিয়ে)")}<input aria-label="Ingredients" value={form.ingredients} onChange={(e) => setForm({ ...form, ingredients: e.target.value })} /></label>
-        <div className="row">
-          {(["available", "featured", "bestSeller", "isNew"] as const).map((k) => <label key={k} style={{ display: "flex", gap: 6, alignItems: "center", margin: 0 }}><input type="checkbox" checked={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.checked })} style={{ width: "auto" }} />{k}</label>)}
-        </div>
-        <div className="row" style={{ marginTop: 10 }}>
-          <button className="btn-gold" type="submit">{tr(lang, "Save product", "প্রোডাক্ট সংরক্ষণ করুন")}</button>
-          {editing && <button className="btn-ghost" type="button" onClick={() => setEditing(null)}>{tr(lang, "Cancel edit", "সম্পাদনা বাতিল")}</button>}
-        </div>
-      </form>
+      {!editing && renderProductForm()}
       <div style={{ overflowX: "auto" }}>
         <table style={{ marginTop: 14 }}>
           <thead><tr><th>{tr(lang, "Product", "প্রোডাক্ট")}</th><th>{tr(lang, "Price", "দাম")}</th><th>{tr(lang, "Stock", "স্টক")}</th><th>{tr(lang, "Shown", "দেখানো হয়")}</th><th /></tr></thead>
-          <tbody>{products.map((p) => <tr key={p.slug}><td>{displayName(p, lang)} <span className="small muted">({p.slug})</span></td><td>{tk(p.discountPrice ?? p.price)}</td><td>{p.stock}</td><td>{p.available ? "✓" : "—"}</td><td><button className="btn-ghost" style={{ padding: "4px 10px" }} onClick={() => startEdit(p)}>{tr(lang, "Edit", "সম্পাদনা")}</button> <button className="btn-danger" style={{ padding: "4px 10px" }} onClick={() => void remove(p)}>{tr(lang, "Delete", "মুছুন")}</button></td></tr>)}</tbody>
+          <tbody>{products.map((p) => (
+            <Fragment key={p.slug}>
+              <tr style={editing?.slug === p.slug ? { background: "var(--surface)", boxShadow: "inset 3px 0 0 var(--gold)" } : undefined}>
+                <td>{displayName(p, lang)} <span className="small muted">({p.slug})</span></td><td>{tk(p.discountPrice ?? p.price)}</td><td>{p.stock}</td><td>{p.available ? "✓" : "—"}</td>
+                <td><button className="btn-ghost" style={{ padding: "4px 10px" }} onClick={() => startEdit(p)}>{editing?.slug === p.slug ? tr(lang, "Close", "বন্ধ করুন") : tr(lang, "Edit", "সম্পাদনা")}</button> <button className="btn-danger" style={{ padding: "4px 10px" }} onClick={() => void remove(p)}>{tr(lang, "Delete", "মুছুন")}</button></td>
+              </tr>
+              {editing?.slug === p.slug && (
+                <tr><td colSpan={5} style={{ padding: 0, border: "none" }}>
+                  <div className="row-expand" style={{ padding: 12, background: "var(--surface)", border: "2px solid var(--gold)", borderRadius: 10, margin: "4px 0 10px" }}>
+                    {renderProductForm()}
+                  </div>
+                </td></tr>
+              )}
+            </Fragment>
+          ))}</tbody>
         </table>
       </div>
       <form onSubmit={(e) => void saveCat(e)} className="card" style={{ padding: 14, marginTop: 18 }}>
@@ -361,17 +487,17 @@ function ReservationsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
 function CouponsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
   const firestore = getDb();
   const { data: coupons } = useLive<Coupon>(() => (firestore ? query(collection(firestore, "coupons"), orderBy("code")) : null),
-    (id, d) => ({ id, code: String(d.code ?? id), kind: String(d.kind ?? "percent"), value: Number(d.value ?? 0), minPurchase: Number(d.minPurchase ?? 0), maxDiscount: d.maxDiscount == null ? null : Number(d.maxDiscount), usageLimit: d.usageLimit == null ? null : Number(d.usageLimit), usedCount: Number(d.usedCount ?? 0), active: d.active !== false, expiresAt: String(d.expiresAt ?? ""), description: String(d.description ?? "") }));
-  const [f, setF] = useState({ code: "", kind: "percent", value: 10, minPurchase: 0, maxDiscount: "", usageLimit: "", expiresAt: "", description: "", active: true });
+    (id, d) => ({ id, code: String(d.code ?? id), kind: String(d.kind ?? "percent"), value: Number(d.value ?? 0), minPurchase: Number(d.minPurchase ?? 0), maxDiscount: d.maxDiscount == null ? null : Number(d.maxDiscount), usageLimit: d.usageLimit == null ? null : Number(d.usageLimit), usedCount: Number(d.usedCount ?? 0), active: d.active !== false, expiresAt: String(d.expiresAt ?? ""), description: String(d.description ?? ""), firstOrderOnly: d.firstOrderOnly === true }));
+  const [f, setF] = useState({ code: "", kind: "percent", value: 10, minPurchase: 0, maxDiscount: "", usageLimit: "", expiresAt: "", description: "", active: true, firstOrderOnly: false });
   const [msg, setMsg] = useState("");
   const save = async (e: FormEvent) => {
     e.preventDefault();
     if (!firestore) return;
     const code = f.code.trim().toUpperCase();
-    await setDoc(doc(firestore, "coupons", code), { code, kind: f.kind, value: Number(f.value), minPurchase: Number(f.minPurchase), maxDiscount: f.maxDiscount === "" ? null : Number(f.maxDiscount), usageLimit: f.usageLimit === "" ? null : Number(f.usageLimit), usedCount: 0, active: f.active, expiresAt: f.expiresAt, description: f.description });
+    await setDoc(doc(firestore, "coupons", code), { code, kind: f.kind, value: Number(f.value), minPurchase: Number(f.minPurchase), maxDiscount: f.maxDiscount === "" ? null : Number(f.maxDiscount), usageLimit: f.usageLimit === "" ? null : Number(f.usageLimit), usedCount: 0, active: f.active, expiresAt: f.expiresAt, description: f.description, firstOrderOnly: f.firstOrderOnly });
     audit(userDoc, "coupon.save", code);
     setMsg(tr(lang, "Offer/coupon saved — customers see it at checkout.", "অফার/কুপন সংরক্ষিত হয়েছে — কাস্টমার চেকআউটে দেখবে।"));
-    setF({ code: "", kind: "percent", value: 10, minPurchase: 0, maxDiscount: "", usageLimit: "", expiresAt: "", description: "", active: true });
+    setF({ code: "", kind: "percent", value: 10, minPurchase: 0, maxDiscount: "", usageLimit: "", expiresAt: "", description: "", active: true, firstOrderOnly: false });
   };
   return (
     <div>
@@ -384,10 +510,11 @@ function CouponsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
         <label>{tr(lang, "Minimum purchase (৳)", "সর্বনিম্ন কেনাকাটা (৳)")}<input aria-label="Minimum purchase" type="number" value={f.minPurchase} onChange={(e) => setF({ ...f, minPurchase: Number(e.target.value) })} /></label>
         <label>{tr(lang, "Expires (date, optional)", "মেয়াদ (তারিখ, ঐচ্ছিক)")}<input aria-label="Coupon expiry" type="date" value={f.expiresAt} onChange={(e) => setF({ ...f, expiresAt: e.target.value })} /></label>
         <label>{tr(lang, "Description", "বিবরণ")}<input aria-label="Coupon description" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></label>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", margin: "8px 0 0" }}><input type="checkbox" style={{ width: "auto" }} checked={f.firstOrderOnly} onChange={(e) => setF({ ...f, firstOrderOnly: e.target.checked })} />{tr(lang, "First order only — a customer who already has an order cannot use it.", "শুধু প্রথম অর্ডারের জন্য — আগের অর্ডার আছে এমন কাস্টমার ব্যবহার করতে পারবে না।")}</label>
         <button className="btn-gold" type="submit">{tr(lang, "Save coupon", "কুপন সংরক্ষণ করুন")}</button>
       </form>
       {coupons.length === 0 && <p className="muted small" style={{ marginTop: 10 }}>{tr(lang, "No coupons yet — make one in the form above.", "এখনো কোনো কুপন নেই — উপরের ফরমে কুপন বানান।")}</p>}
-      {coupons.map((c) => <p key={c.id} className="small">{c.code} — {c.kind} {c.value} • {c.active ? tr(lang, "active", "সক্রিয়") : tr(lang, "inactive", "নিষ্ক্রিয়")} • {tr(lang, "used", "ব্যবহৃত")} {c.usedCount} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { if (firestore) void updateDoc(doc(firestore, "coupons", c.id), { active: !c.active }); }}>{c.active ? tr(lang, "Deactivate", "বন্ধ করুন") : tr(lang, "Activate", "চালু করুন")}</button> <button className="btn-danger" style={{ padding: "2px 8px" }} onClick={() => { if (firestore) void deleteDoc(doc(firestore, "coupons", c.id)); }}>{tr(lang, "Delete", "মুছুন")}</button></p>)}
+      {coupons.map((c) => <p key={c.id} className="small">{c.code} — {c.kind} {c.value}{c.firstOrderOnly ? ` • ${tr(lang, "first order only", "শুধু প্রথম অর্ডার")}` : ""} • {c.active ? tr(lang, "active", "সক্রিয়") : tr(lang, "inactive", "নিষ্ক্রিয়")} • {tr(lang, "used", "ব্যবহৃত")} {c.usedCount} <button className="btn-ghost" style={{ padding: "2px 8px" }} onClick={() => { if (firestore) void updateDoc(doc(firestore, "coupons", c.id), { active: !c.active }); }}>{c.active ? tr(lang, "Deactivate", "বন্ধ করুন") : tr(lang, "Activate", "চালু করুন")}</button> <button className="btn-danger" style={{ padding: "2px 8px" }} onClick={() => { if (firestore) void deleteDoc(doc(firestore, "coupons", c.id)); }}>{tr(lang, "Delete", "মুছুন")}</button></p>)}
     </div>
   );
 }
@@ -486,15 +613,38 @@ function SettingsTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: 
           <label style={{ flex: 1 }}>{tr(lang, "Points to redeem", "রিডিমে পয়েন্ট")}<input aria-label="Loyalty redeem points" type="number" value={f.loyaltyRedeemPoints} onChange={num("loyaltyRedeemPoints")} /></label>
           <label style={{ flex: 1 }}>{tr(lang, "Redeem value (৳)", "রিডিম মান (৳)")}<input aria-label="Loyalty redeem value" type="number" value={f.loyaltyRedeemValue} onChange={num("loyaltyRedeemValue")} /></label>
         </div>
+        <b style={{ marginTop: 14 }}>{tr(lang, "Offers & Happy Hour (these values are live everywhere the moment they are saved)", "অফার ও হ্যাপি আওয়ার (সেভ করলেই সব জায়গায় চালু হবে)")}</b>
+        <div className="row" style={{ marginTop: 8 }}>
+          <label style={{ flex: 1 }}>{tr(lang, "Combo: buy this many of one item", "কম্বো: এক আইটেম কতটা কিনলে")}<input aria-label="Combo minimum quantity" type="number" min={1} value={f.comboMinQty} onChange={num("comboMinQty")} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Combo discount (৳)", "কম্বো ছাড় (৳)")}<input aria-label="Combo discount" type="number" min={0} value={f.comboDiscount} onChange={num("comboDiscount")} /></label>
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <label style={{ flex: 1 }}>{tr(lang, "Happy Hour starts", "হ্যাপি আওয়ার শুরু")}<input aria-label="Happy Hour start time" type="time" value={f.happyHourStart} onChange={str("happyHourStart")} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Happy Hour ends", "হ্যাপি আওয়ার শেষ")}<input aria-label="Happy Hour end time" type="time" value={f.happyHourEnd} onChange={str("happyHourEnd")} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Happy Hour discount (%)", "হ্যাপি আওয়ার ছাড় (%)")}<input aria-label="Happy Hour discount percent" type="number" min={0} value={f.happyHourPercent} onChange={num("happyHourPercent")} /></label>
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <label style={{ flex: 1 }}>{tr(lang, "Customer cancel window (minutes)", "কাস্টমার বাতিলের সময়সীমা (মিনিট)")}<input aria-label="Customer cancel window minutes" type="number" min={0} value={f.cancelWindowMinutes} onChange={num("cancelWindowMinutes")} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Trust: Caution at cancel rate (%)", "ট্রাস্ট: সতর্ক সীমা — বাতিলের হার (%)")}<input aria-label="Trust caution percent" type="number" min={0} max={100} value={f.riskCautionPct} onChange={num("riskCautionPct")} /></label>
+          <label style={{ flex: 1 }}>{tr(lang, "Trust: Risky at cancel rate (%)", "ট্রাস্ট: ঝুঁকিপূর্ণ সীমা — বাতিলের হার (%)")}<input aria-label="Trust risky percent" type="number" min={0} max={100} value={f.riskRiskyPct} onChange={num("riskRiskyPct")} /></label>
+        </div>
+        <p className="small muted">{tr(lang, "After this many minutes the customer can no longer cancel — only the admin can. The customer can still message the admin in the chatbox. A phone number whose cancel rate reaches the Risky limit shows a red warning on its orders; at the Caution limit it shows yellow.", "এত মিনিট পর কাস্টমার আর বাতিল করতে পারবে না — তখন শুধু অ্যাডমিন বাতিল করতে পারবেন। কাস্টমার চ্যাটবক্সে অ্যাডমিনকে জানাতে পারবেন। কোনো নম্বরের বাতিলের হার ঝুঁকিপূর্ণ সীমায় পৌঁছালে তার অর্ডারে লাল সতর্কতা দেখাবে; সতর্ক সীমায় হলুদ।")}</p>
+        <b style={{ marginTop: 14 }}>{tr(lang, "AI assistant (inside the customer chatbox)", "AI সহকারী (কাস্টমার চ্যাটবক্সের ভেতরে)")}</b>
+        <label style={{ marginTop: 8 }}>{tr(lang, "Gemini API key", "Gemini API কী")}<input aria-label="Gemini API key" type="password" value={f.geminiApiKey} onChange={str("geminiApiKey")} placeholder="AIza…" autoComplete="off" /></label>
+        <p className="small muted">{tr(lang, "The chatbox AI answers customers from the live menu and offers using this key. Restrict the key in Google Cloud Console → Credentials → API restrictions + HTTP referrers to cafe-reza.web.app ONLY before pasting it here — otherwise anyone who reads it could use it. Leave it empty and the chat still works; customers just talk to the admin directly.", "চ্যাটবক্সের AI এই কী দিয়ে লাইভ মেনু ও অফার থেকে কাস্টমারের উত্তর দেয়। এখানে বসানোর আগে Google Cloud Console → Credentials-এ কী-টিকে API restrictions ও HTTP referrers দিয়ে শুধু cafe-reza.web.app-এর জন্য সীমাবদ্ধ করুন — নইলে যে কেউ পড়ে ব্যবহার করতে পারবে। খালি রাখলে চ্যাট তবু চলবে; কাস্টমার সরাসরি অ্যাডমিনের সাথে কথা বলবেন।")}</p>
         <button className="btn-gold" style={{ marginTop: 12 }} type="submit">{tr(lang, "Save settings", "সেটিংস সংরক্ষণ করুন")}</button>
       </form>
     </div>
   );
 }
 
-function UsersTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
+function UsersTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: Settings; lang: Lang }) {
   const firestore = getDb();
   const { data: users } = useLive<UserDoc>(() => (firestore ? query(collection(firestore, "users"), orderBy("createdAt", "desc"), limit(60)) : null), userFromDoc);
+  // Phone trust comes from the recent orders (same source as the
+  // Live Orders badges), so a customer's history is visible here too.
+  const { data: statsOrders } = useLive<Order>(() => (firestore ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(200)) : null), orderFromDoc);
+  const phoneStats = useMemo(() => computePhoneStats(statsOrders), [statsOrders]);
   const [msg, setMsg] = useState("");
   const changeRole = async (u: UserDoc, role: string) => {
     if (!firestore) return;
@@ -512,6 +662,7 @@ function UsersTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
       {users.map((u) => (
         <div key={u.id} className="card" style={{ padding: 10, marginTop: 8 }}>
           <b>{u.name}</b> — {u.email} • {u.phone} • {u.loyaltyPoints} {tr(lang, "pts", "পয়েন্ট")} • {u.status}
+          {u.role === "customer" && <span style={{ marginLeft: 8 }}><PhoneTrustBadge stats={phoneStats.get(normalizePhone(u.phone ?? ""))} settings={settings} lang={lang} /></span>}
           <div className="row" style={{ marginTop: 6 }}>
             <label style={{ margin: 0 }}>{tr(lang, "Role", "রোল")}<select aria-label={`Role for ${u.email}`} value={u.role} onChange={(e) => void changeRole(u, e.target.value)}><option value="customer">customer</option>{STAFF_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}</select></label>
             <button className="btn-ghost" style={{ padding: "6px 10px" }} onClick={() => { if (firestore) void updateDoc(doc(firestore, "users", u.id), { status: u.status === "active" ? "suspended" : "active" }); }}>{u.status === "active" ? tr(lang, "Suspend", "সাসপেন্ড") : tr(lang, "Activate", "সক্রিয় করুন")}</button>
@@ -524,33 +675,85 @@ function UsersTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
 
 function SupportTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Product[]; lang: Lang }) {
   const firestore = getDb();
-  const { data: messages } = useLive(() => (firestore ? query(collection(firestore, "messages"), orderBy("createdAt", "desc"), limit(50)) : null),
-    (id, d) => ({ id, userId: String(d.userId ?? ""), author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), body: String(d.body ?? ""), orderNo: String(d.orderNo ?? ""), readFlag: !!d.readFlag }));
+  const { data: messages } = useLive(() => (firestore ? query(collection(firestore, "messages"), orderBy("createdAt", "desc"), limit(100)) : null),
+    (id, d) => ({ id, userId: String(d.userId ?? ""), author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), guestName: String(d.guestName ?? ""), guestPhone: String(d.guestPhone ?? ""), body: String(d.body ?? ""), orderNo: String(d.orderNo ?? ""), readFlag: !!d.readFlag, createdAt: tsToIso(d.createdAt) }));
   const { data: tickets } = useLive(() => (firestore ? query(collection(firestore, "tickets"), orderBy("createdAt", "desc"), limit(30)) : null),
     (id, d) => ({ id, name: String(d.name ?? ""), phone: String(d.phone ?? ""), category: String(d.category ?? "General"), priority: String(d.priority ?? "Normal"), status: String(d.status ?? "Open"), message: String(d.message ?? ""), reply: String(d.reply ?? "") }));
   const { data: reviews } = useLive(() => (firestore ? query(collection(firestore, "reviews"), orderBy("createdAt", "desc"), limit(30)) : null),
     (id, d) => ({ id, productId: String(d.productId ?? ""), author: String(d.author ?? ""), rating: Number(d.rating ?? 5), comment: String(d.comment ?? ""), status: String(d.status ?? "Pending") }));
   const [reply, setReply] = useState("");
-  const [replyTo, setReplyTo] = useState<string | null>(null);
+  const [openThread, setOpenThread] = useState<string | null>(null);
+  // One conversation per customer, newest first — the admin sees who
+  // wrote, what they last said, and how many of their messages are
+  // still unread. Opening a thread marks the customer's messages
+  // read, so the unread counts stay honest.
+  const threads = useMemo(() => {
+    const byId = new Map<string, typeof messages>();
+    for (const m of messages) {
+      const arr = byId.get(m.userId) ?? [];
+      arr.push(m);
+      byId.set(m.userId, arr);
+    }
+    return [...byId.entries()].map(([userId, list]) => {
+      const sorted = [...list].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      const unread = list.filter((m) => m.author === "customer" && !m.readFlag).length;
+      const last = sorted[sorted.length - 1];
+      const name = sorted.find((m) => m.author === "customer")?.authorName || sorted[0]?.guestName || sorted[0]?.authorName || userId;
+      const phone = sorted.find((m) => m.guestPhone)?.guestPhone ?? "";
+      return { userId, list: sorted, unread, last, name, phone };
+    }).sort((a, b) => (b.last?.createdAt ?? "").localeCompare(a.last?.createdAt ?? ""));
+  }, [messages]);
+  const open = async (userId: string) => {
+    setOpenThread(userId);
+    if (!firestore) return;
+    const thread = threads.find((t) => t.userId === userId);
+    const unread = thread?.list.filter((m) => m.author === "customer" && !m.readFlag) ?? [];
+    if (unread.length === 0) return;
+    const batch = writeBatch(firestore);
+    for (const m of unread) batch.update(doc(firestore, "messages", m.id), { readFlag: true });
+    await batch.commit();
+  };
   const sendReply = async (userId: string) => {
     if (!firestore || !reply.trim()) return;
     await addDoc(collection(firestore, "messages"), { userId, guestName: "", guestPhone: "", orderNo: "", author: "staff", authorName: userDoc.name, body: reply.trim(), readFlag: false, createdAt: serverTimestamp() });
-    setReply(""); setReplyTo(null);
+    setReply("");
   };
+  const active = threads.find((t) => t.userId === openThread) ?? null;
   return (
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Support & Reviews", "সাপোর্ট ও রিভিউ")}</h3>
       <h4 className="serif" style={{ fontSize: 18, marginTop: 14 }}>{tr(lang, "Messages", "মেসেজ")}</h4>
-      {messages.length === 0 && <p className="muted small">{tr(lang, "No messages yet.", "এখনো কোনো মেসেজ নেই।")}</p>}
-      {messages.map((m) => (
-        <div key={m.id} className="card" style={{ padding: 10, marginTop: 8 }}>
-          <b>{m.authorName || m.author}</b> {m.orderNo && <span className="small muted">({m.orderNo})</span>}
-          <p className="small" style={{ margin: "4px 0" }}>{m.body}</p>
-          {replyTo === m.userId
-            ? <><input aria-label="Staff reply" value={reply} onChange={(e) => setReply(e.target.value)} placeholder={tr(lang, "Write a reply…", "জবাব লিখুন…")} /><button className="btn-gold" style={{ marginTop: 6 }} onClick={() => void sendReply(m.userId)}>{tr(lang, "Send reply", "জবাব পাঠান")}</button></>
-            : <button className="btn-ghost" style={{ padding: "4px 10px" }} onClick={() => setReplyTo(m.userId)}>{tr(lang, "Reply", "জবাব দিন")}</button>}
+      {threads.length === 0 && <p className="muted small">{tr(lang, "No messages yet.", "এখনো কোনো মেসেজ নেই।")}</p>}
+      {active ? (
+        <div className="card" style={{ padding: 12, marginTop: 10 }}>
+          <button className="btn-ghost" style={{ padding: "4px 10px" }} onClick={() => setOpenThread(null)}>← {tr(lang, "All messages", "সব মেসেজ")}</button>
+          <p style={{ marginTop: 8 }}><b>{active.name}</b> {active.phone && <span className="small muted">• {active.phone}</span>}</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+            {active.list.map((m) => (
+              <div key={m.id} style={{ alignSelf: m.author === "staff" ? "flex-end" : "flex-start", maxWidth: "85%", background: m.author === "staff" ? "var(--gold)" : "var(--surface)", color: m.author === "staff" ? "#fff" : "inherit", borderRadius: 12, padding: "8px 10px" }}>
+                <span className="small" style={{ fontWeight: 700, opacity: 0.85 }}>{m.author === "ai" ? `🤖 ${m.authorName}` : m.author === "staff" ? `🏪 ${m.authorName}` : m.authorName || tr(lang, "Customer", "কাস্টমার")}</span>
+                <p className="small" style={{ margin: "2px 0 0", whiteSpace: "pre-wrap" }}>{m.body}</p>
+                {m.createdAt && <p className="small muted" style={{ margin: "2px 0 0" }}>{new Date(m.createdAt).toLocaleString("en-GB")}</p>}
+              </div>
+            ))}
+          </div>
+          <div className="row" style={{ marginTop: 10 }}>
+            <input aria-label="Staff reply" value={reply} onChange={(e) => setReply(e.target.value)} placeholder={tr(lang, "Write a reply…", "জবাব লিখুন…")} style={{ flex: 1 }} />
+            <button className="btn-gold" onClick={() => void sendReply(active.userId)}>{tr(lang, "Send reply", "জবাব পাঠান")}</button>
+          </div>
         </div>
-      ))}
+      ) : (
+        threads.map((t) => (
+          <div key={t.userId} className="card" style={{ padding: 10, marginTop: 8, cursor: "pointer" }} onClick={() => void open(t.userId)}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <b>{t.name}</b>
+              {t.unread > 0 && <span style={{ background: "var(--bad)", color: "#fff", borderRadius: 999, fontSize: 11, fontWeight: 700, minWidth: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 6px" }}>{t.unread} {tr(lang, "new", "নতুন")}</span>}
+            </div>
+            {t.phone && <p className="small muted" style={{ margin: "2px 0" }}>{t.phone}</p>}
+            <p className="small" style={{ margin: "4px 0 0" }}>{t.last ? `${t.last.author === "staff" ? "🏪" : t.last.author === "ai" ? "🤖" : "👤"} ${t.last.body}` : ""}</p>
+          </div>
+        ))
+      )}
       <h4 className="serif" style={{ fontSize: 18, marginTop: 18 }}>{tr(lang, "Tickets", "টিকিট")}</h4>
       {tickets.length === 0 && <p className="muted small">{tr(lang, "No tickets yet.", "এখনো কোনো টিকিট নেই।")}</p>}
       {tickets.map((t) => (
@@ -662,7 +865,7 @@ function FirebaseTab({ userDoc, lang, onSeed, seedBusy, seedMsg }: { userDoc: Us
       </div>
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Seed the real catalog", "আসল ক্যাটালগ বসান")}</b>
-        <p className="small muted">{tr(lang, "Writes the 34 products and 9 categories (owner's printed menu prices) only where Firestore is empty. Never overwrites an admin-edited price or stock.", "৩৪টি প্রোডাক্ট ও ৯টি ক্যাটাগরি (মালিকের ছাপা মেনুর দাম) শুধু খালি জায়গায় লেখে। অ্যাডমিনের বদলানো দাম বা স্টক কখনো ওভাররাইট করে না।")}</p>
+        <p className="small muted">{tr(lang, "Writes the 26 products and 9 categories (owner's printed menu prices) only where Firestore is empty. Never overwrites an admin-edited price or stock.", "২৬টি প্রোডাক্ট ও ৯টি ক্যাটাগরি (মালিকের ছাপা মেনুর দাম) শুধু খালি জায়গায় লেখে। অ্যাডমিনের বদলানো দাম বা স্টক কখনো ওভাররাইট করে না।")}</p>
         <button className="btn-gold" disabled={seedBusy} onClick={onSeed}>{seedBusy ? tr(lang, "Seeding…", "বসানো হচ্ছে…") : tr(lang, "Seed catalog", "ক্যাটালগ বসান")}</button>
         {seedMsg && <p className="small" role="status">{seedMsg}</p>}
       </div>
@@ -778,16 +981,24 @@ function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[];
   const best = (() => {
     const m = new Map<string, { name: string; qty: number; rev: number }>();
     completed.forEach((o) => o.items.forEach((it) => { const cur = m.get(it.productId) ?? { name: itemName(products, it, lang), qty: 0, rev: 0 }; cur.qty += it.qty; cur.rev += it.price * it.qty; m.set(it.productId, cur); }));
-    return [...m.values()].sort((a, b) => b.qty - a.qty).slice(0, 8);
+    return [...m.entries()].map(([slug, v]) => ({ slug, ...v })).sort((a, b) => b.qty - a.qty).slice(0, 8);
   })();
   const byCat = (() => {
     const m = new Map<string, number>();
     const prodBySlug = new Map(products.map((p) => [p.slug, p]));
     completed.forEach((o) => o.items.forEach((it) => { const p = prodBySlug.get(it.productId); const cid = p?.categoryId ?? ""; m.set(cid, (m.get(cid) ?? 0) + it.price * it.qty); }));
-    return [...m.entries()].map(([cid, rev]) => {
+    const rows = [...m.entries()].map(([cid, rev]) => {
       const cat = categories.find((c) => c.id === cid);
       return { name: cat ? (lang === "bn" ? cat.nameBn : cat.nameEn) : tr(lang, "Other", "অন্যান্য"), rev };
     }).sort((a, b) => b.rev - a.rev);
+    // Delivery fees are part of the order total (and of the Revenue
+    // headline), but they belong to no product category — the old code
+    // left them out, so the category bars summed ৳40 short of Revenue
+    // on a delivered order with a delivery fee. Show them as their own
+    // line so the parts add up to the headline.
+    const delivery = completed.reduce((a, o) => a + (o.deliveryFee ?? 0), 0);
+    if (delivery > 0) rows.push({ name: tr(lang, "Delivery", "ডেলিভারি"), rev: delivery });
+    return rows.sort((a, b) => b.rev - a.rev);
   })();
   const byPayment = (() => {
     const m = new Map<string, { n: number; rev: number }>();
@@ -803,6 +1014,25 @@ function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[];
   })();
   const maxBest = best[0]?.qty ?? 0;
   const maxCat = byCat[0]?.rev ?? 0;
+  // The "Popular" badge on the customer menu is driven by these real
+  // sales: one tap marks the top 5 sellers as Popular and clears the
+  // badge from the rest, so the menu always shows what actually sells.
+  const [syncMsg, setSyncMsg] = useState("");
+  const syncBestSellers = async () => {
+    const firestore = getDb();
+    if (!firestore) return;
+    if (best.length === 0) { setSyncMsg(tr(lang, "No sales in this period — nothing to sync.", "এই সময়ে কোনো বিক্রি নেই — সিঙ্ক করার কিছু নেই।")); return; }
+    const top = new Set(best.slice(0, 5).map((b) => b.slug));
+    const batch = writeBatch(firestore);
+    let changed = 0;
+    products.forEach((p) => {
+      const want = top.has(p.slug);
+      if (p.bestSeller !== want) { batch.update(doc(firestore, "products", p.slug), { bestSeller: want }); changed++; }
+    });
+    if (changed === 0) { setSyncMsg(tr(lang, "The Popular badges are already up to date.", "জনপ্রিয় ব্যাজগুলো ইতিমধ্যেই হালনাগাদ আছে।")); return; }
+    await batch.commit();
+    setSyncMsg(tr(lang, `${changed} products updated — the top ${top.size} sellers now show the Popular badge on the menu.`, `${changed}টি প্রোডাক্ট বদলানো হয়েছে — সেরা ${top.size}টি এখন মেনুতে জনপ্রিয় ব্যাজ দেখাবে।`));
+  };
   const downloadCsv = () => {
     const rows: string[][] = [["Order", "Date", "Customer", "Phone", "Items", "Total", "Status", "Payment", "PaymentStatus"]];
     list.forEach((o) => rows.push([o.orderNo, o.createdAt, o.customerName, o.phone, o.items.map((it) => `${it.qty}x ${itemName(products, it, lang)}`).join("; "), String(o.total), o.status, o.paymentMethod, o.paymentStatus]));
@@ -818,6 +1048,7 @@ function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[];
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Analytics", "অ্যানালাইসিস")}</h3>
       <p className="small muted">{tr(lang, "Real orders from Firestore only. Orders counts every order in this period. Revenue and the money breakdowns count only Completed / Delivered orders; Cancelled / Refunded are excluded.", "শুধু Firestore-এর আসল অর্ডার। অর্ডার সংখ্যা এই সময়ের সব অর্ডার। আয় আর টাকার ভাগগুলো শুধু সম্পন্ন / ডেলিভার্ড অর্ডার; বাতিল / ফেরত বাদ।")}</p>
       <PeriodButtons period={period} setPeriod={setPeriod} lang={lang} />
+      <DigitalAnalyzer orders={list} products={products} lang={lang} period={period} />
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginTop: 10 }}>
         <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(revenue)}</b><p className="small">{tr(lang, "Revenue", "আয়")}</p></div>
         <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{list.length}</b><p className="small">{tr(lang, "Orders", "অর্ডার")}</p></div>
@@ -829,6 +1060,9 @@ function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[];
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Best sellers", "সেরা বিক্রি")}</b>
         {best.length === 0 ? <p className="small muted">{tr(lang, "No orders in this period.", "এই সময়ে কোনো অর্ডার নেই।")}</p> : best.map((b) => <Bar key={b.name} label={`${b.name} × ${b.qty}`} value={b.qty} max={maxBest} suffix={tk(b.rev)} />)}
+        <p className="small muted" style={{ marginTop: 10 }}>{tr(lang, "The Popular badge on the menu comes from these real sales. Sync it when the top sellers change.", "মেনুর জনপ্রিয় ব্যাজ এই আসল বিক্রি থেকেই আসে। সেরা বিক্রি বদলালে এখানে সিঙ্ক করুন।")}</p>
+        <button className="btn-gold" onClick={() => void syncBestSellers()}>{tr(lang, "Mark top 5 as Popular on the menu", "সেরা ৫টিকে মেনুতে জনপ্রিয় করুন")}</button>
+        {syncMsg && <p className="small" role="status" style={{ marginTop: 6 }}>{syncMsg}</p>}
       </div>
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Revenue by category", "ক্যাটাগরি অনুযায়ী আয়")}</b>
@@ -1154,9 +1388,13 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
                 <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{todayBest ? `${todayBest.name} × ${todayBest.qty}` : "—"}</b><p className="small">{tr(lang, "Best seller today", "আজকের সেরা বিক্রি")}</p></div>
               </div>
             )}
-            <div className="card" style={{ padding: 14, marginTop: 12 }}>
-              <b>{tr(lang, "Low stock", "কম স্টক")}</b>
-              {lowStock.length === 0 ? <p className="small muted">{tr(lang, "No product is at or below 5 in stock.", "কোনো প্রোডাক্টের স্টক ৫ বা তার নিচে নেই।")}</p> : lowStock.map((p) => <p key={p.slug} className="small">{displayName(p, lang)} — {p.stock} {tr(lang, "left", "বাকি")}</p>)}
+            <div className="card" style={{ padding: 14, marginTop: 12, border: lowStock.length > 0 ? "2px solid var(--bad)" : undefined, background: lowStock.length > 0 ? "rgba(224,120,86,.08)" : undefined }}>
+              <b style={{ color: lowStock.length > 0 ? "var(--bad)" : undefined }}>⚠ {tr(lang, "Low stock — act now", "কম স্টক — এখনই দেখুন")}</b>
+              {lowStock.length === 0 ? <p className="small muted">{tr(lang, "No product is at or below 5 in stock.", "কোনো প্রোডাক্টের স্টক ৫ বা তার নিচে নেই।")}</p> : <>
+                <p className="small" style={{ marginTop: 6, fontWeight: 700, color: "var(--bad)" }}>{tr(lang, `${lowStock.length} products are running low — restock before they run out.`, `${lowStock.length}টি প্রোডাক্ট শেষের দিকে — শেষ হওয়ার আগেই স্টক বাড়ান।`)}</p>
+                {lowStock.map((p) => <p key={p.slug} className="small" style={{ color: "var(--bad)", fontWeight: 700 }}>{displayName(p, lang)} — {p.stock} {tr(lang, "left", "বাকি")}</p>)}
+                <button className="btn-gold" style={{ marginTop: 8 }} onClick={() => setTab("products")}>{tr(lang, "Open Products to restock", "স্টক বাড়াতে প্রোডাক্ট খুলুন")}</button>
+              </>}
             </div>
             <div className="card" style={{ padding: 14, marginTop: 12 }}>
               <b>{tr(lang, "What the admin panel controls", "অ্যাডমিন প্যানেল যা যা নিয়ন্ত্রণ করে")}</b>
@@ -1164,7 +1402,7 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
             </div>
           </div>
         )}
-        {activeTab === "orders" && <OrdersTab userDoc={userDoc} products={products} lang={lang} />}
+        {activeTab === "orders" && <OrdersTab userDoc={userDoc} products={products} settings={settings} lang={lang} />}
         {activeTab === "pos" && <PosTab userDoc={userDoc} products={products} settings={settings} lang={lang} />}
         {activeTab === "products" && <ProductsTab userDoc={userDoc} categories={categories} products={products} lang={lang} />}
         {activeTab === "reservations" && <ReservationsTab userDoc={userDoc} lang={lang} />}
@@ -1174,7 +1412,7 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
         {activeTab === "ads" && <AdsTab userDoc={userDoc} settings={settings} lang={lang} />}
         {activeTab === "content" && <ContentTab userDoc={userDoc} settings={settings} lang={lang} />}
         {activeTab === "settings" && <SettingsTab userDoc={userDoc} settings={settings} lang={lang} />}
-        {activeTab === "users" && <UsersTab userDoc={userDoc} lang={lang} />}
+        {activeTab === "users" && <UsersTab userDoc={userDoc} settings={settings} lang={lang} />}
         {activeTab === "support" && <SupportTab userDoc={userDoc} products={products} lang={lang} />}
         {activeTab === "inventory" && <InventoryTab userDoc={userDoc} lang={lang} />}
         {activeTab === "firebase" && <FirebaseTab userDoc={userDoc} lang={lang} onSeed={onSeed} seedBusy={seedBusy} seedMsg={seedMsg} />}

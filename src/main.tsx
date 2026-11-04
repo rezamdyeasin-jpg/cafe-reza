@@ -39,6 +39,23 @@ window.addEventListener("unhandledrejection", (e) => {
   showFatal(`Error: ${r instanceof Error ? r.message : String(r)}`);
 });
 
+// PWA install prompt, captured GLOBALLY and as early as possible.
+// `beforeinstallprompt` fires once, at page load — often BEFORE the
+// InstallAppCard mounts (it lives low on the homepage / inside the
+// admin Apps tab), so a listener inside that card misses the event
+// and the Install button looks dead. Capturing it here, before React
+// renders, means the prompt is never lost; the card reads it from
+// window whenever it mounts.
+export type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice?: Promise<{ outcome: "accepted" | "dismissed" }> };
+declare global {
+  interface Window { __deferredInstallPrompt?: InstallPromptEvent | null; }
+}
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  window.__deferredInstallPrompt = e as InstallPromptEvent;
+});
+window.addEventListener("appinstalled", () => { window.__deferredInstallPrompt = null; });
+
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("missing #root element");
 if ("serviceWorker" in navigator) {

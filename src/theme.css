@@ -58,7 +58,18 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
 .bottomnav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; justify-content: space-around; background: var(--surface); border-top: 1px solid var(--border); padding: 8px 4px calc(8px + env(safe-area-inset-bottom)); }
 .bottomnav button { background: none; border: none; color: var(--text); font-size: 13px; padding: 6px 8px; }
 @media (min-width: 720px) { .bottomnav { display: none; } }
-@media print { .no-print { display: none !important; } }
+@media print {
+  .no-print { display: none !important; }
+  /* Print only the receipt: hide the whole app, then reveal just
+     the receipt (and its contents) at the top-left of the page. */
+  body * { visibility: hidden; }
+  .receipt-print, .receipt-print * { visibility: visible; }
+  .receipt-print { position: absolute !important; left: 0; top: 0; width: 100%; max-width: 520px; box-shadow: none !important; }
+}
+/* Inline editor opening under a table row (admin product edit):
+   a short slide-and-fade so it is obvious what just opened. */
+@keyframes rowExpand { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.row-expand { animation: rowExpand .25s ease; }
 /* Small utilities the components already use (same scale as Tailwind). */
 .flex { display: flex; }
 .block { display: block; }
