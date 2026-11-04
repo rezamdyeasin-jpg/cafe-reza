@@ -39,6 +39,10 @@ const imgSrc = (key: string | null | undefined) => (key ? `/img/${key}` : "");
 const displayName = (p: Product, lang: Lang) => (lang === "bn" && p.nameBn ? p.nameBn : p.nameEn);
 const taglineText = (settings: Settings, lang: Lang) => (lang === "bn" ? (settings.taglineBn || settings.tagline) : settings.tagline);
 const taglineClass = (lang: Lang) => (lang === "bn" ? "tagline-bn" : "tagline-en");
+// Facebook/Messenger/Instagram open links in their own built-in browser,
+// which partitions storage — Firebase Google/Facebook sign-in cannot
+// complete there (missing initial state). Users must open in Chrome.
+const isInAppBrowser = () => typeof navigator !== "undefined" && /FBAN|FBAV|Instagram/i.test(navigator.userAgent);
 const effPrice = (p: Product) => p.discountPrice ?? p.price;
 const orderable = (p: Product) => p.available && effPrice(p) > 0;
 
@@ -213,6 +217,12 @@ function SignInCard({ lang, onSignedIn }: { lang: Lang; onSignedIn: () => void }
       <div className="logo-tile mx-auto" style={{ width: 88, height: 88 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></div>
       <h1 className="serif text-center" style={{ fontSize: 24, marginTop: 10 }}>{tr(lang, "Log in to Café Reza", "ক্যাফে রেজা-এ লগইন করুন")}</h1>
       <p className="small muted text-center">{tr(lang, "Sign in with Google, Facebook or your phone number — new here? The same buttons create your account. New accounts are always customers. No password, no email verification step.", "Google, Facebook বা ফোন নম্বর দিয়ে সাইন-ইন করুন — নতুন হলে একই বোতামে অ্যাকাউন্ট তৈরি হবে। নতুন অ্যাকাউন্ট সবসময় কাস্টমার। কোনো পাসওয়ার্ড ও কোনো ইমেইল যাচাইয়ের ধাপ নেই।")}</p>
+      {isInAppBrowser() && (
+        <div className="card" role="alert" style={{ marginTop: 12, padding: 12, border: "1px solid var(--bad)", background: "rgba(224,120,86,.12)" }}>
+          <b>{tr(lang, "Open in Chrome to sign in", "সাইন-ইন করতে Chrome-এ খুলুন")}</b>
+          <p className="small" style={{ margin: "6px 0 0" }}>{tr(lang, "You opened this inside Messenger/Facebook's built-in browser. Google and Facebook sign-in do not work here. Tap ⋯ at the top, choose “Open in Chrome”, then sign in.", "আপনি মেসেঞ্জার/ফেসবুকের ভেতরের ব্রাউজার থেকে খুলেছেন। এখানে Google/Facebook দিয়ে সাইন-ইন কাজ করবে না। ওপরের ⋯ (তিন ডট) চেপে “Open in Chrome” / “Chrome-এ খুলুন” চাপুন, তারপর সাইন-ইন করুন।")}</p>
+        </div>
+      )}
       <button type="button" disabled={busy} className="btn-ghost" style={{ width: "100%", marginTop: 14, background: "#fff", color: "#24150f", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px" }} onClick={() => void onSocial("google")} aria-label="Login with Gmail"><GoogleG /> Login with Gmail</button>
       <button type="button" disabled={busy} style={{ width: "100%", marginTop: 8, background: "#1877f2", color: "#fff", border: "none", borderRadius: 999, padding: "12px", fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }} onClick={() => void onSocial("facebook")} aria-label="Continue with Facebook"><span aria-hidden="true" style={{ display: "flex", width: 20, height: 20, borderRadius: "50%", background: "#fff", color: "#1877f2", alignItems: "center", justifyContent: "center", fontWeight: 800 }}>f</span>{tr(lang, "Continue with Facebook", "Facebook দিয়ে চালিয়ে যান")}</button>
       {!showPhone && <button type="button" className="btn-gold" style={{ width: "100%", marginTop: 8 }} onClick={() => setShowPhone(true)}>{tr(lang, "Continue with phone number", "ফোন নম্বর দিয়ে চালিয়ে যান")}</button>}
