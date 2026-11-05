@@ -888,7 +888,7 @@ function SupportTab({ userDoc, products, lang }: { userDoc: UserDoc; products: P
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
             {active.list.map((m) => (
               <div key={m.id} style={{ alignSelf: m.author === "staff" ? "flex-end" : "flex-start", maxWidth: "85%", background: m.author === "staff" ? "var(--gold)" : "var(--surface)", color: m.author === "staff" ? "#fff" : "inherit", borderRadius: 12, padding: "8px 10px" }}>
-                <span className="small" style={{ fontWeight: 700, opacity: 0.85 }}>{m.author === "ai" ? `🤖 ${m.authorName}` : m.author === "staff" ? `🏪 ${m.authorName}` : m.authorName || tr(lang, "Customer", "কাস্টমার")}</span>
+                <span className="small" style={{ fontWeight: 700, opacity: 0.85 }}>{m.author === "ai" ? (<><img src="/img/logo.jpg" alt="" style={{ width: 18, height: 18, borderRadius: "50%", verticalAlign: "-4px", marginRight: 4 }} />{m.authorName}</>) : m.author === "staff" ? `🏪 ${m.authorName}` : m.authorName || tr(lang, "Customer", "কাস্টমার")}</span>
                 <p className="small" style={{ margin: "2px 0 0", whiteSpace: "pre-wrap" }}>{m.body}</p>
                 {m.createdAt && <p className="small muted" style={{ margin: "2px 0 0" }}>{new Date(m.createdAt).toLocaleString("en-GB")}</p>}
               </div>
@@ -907,7 +907,7 @@ function SupportTab({ userDoc, products, lang }: { userDoc: UserDoc; products: P
               {t.unread > 0 && <span style={{ background: "var(--bad)", color: "#fff", borderRadius: 999, fontSize: 11, fontWeight: 700, minWidth: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 6px" }}>{t.unread} {tr(lang, "new", "নতুন")}</span>}
             </div>
             {t.phone && <p className="small muted" style={{ margin: "2px 0" }}>{t.phone}</p>}
-            <p className="small" style={{ margin: "4px 0 0" }}>{t.last ? `${t.last.author === "staff" ? "🏪" : t.last.author === "ai" ? "🤖" : "👤"} ${t.last.body}` : ""}</p>
+            <p className="small" style={{ margin: "4px 0 0" }}>{t.last ? (<>{t.last.author === "staff" ? "🏪" : t.last.author === "ai" ? (<img src="/img/logo.jpg" alt="" style={{ width: 16, height: 16, borderRadius: "50%", verticalAlign: "-3px", marginRight: 3 }} />) : "👤"} {t.last.body}</>) : ""}</p>
           </div>
         ))
       )}

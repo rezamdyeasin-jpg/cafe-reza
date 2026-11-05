@@ -1279,7 +1279,7 @@ function ChatBox({ fbUser, userDoc, products, settings, lang }: { fbUser: User |
                 {messages.length === 0 && <p className="small muted">{tr(lang, "Ask anything — the menu, offers, opening hours, or your order. The AI assistant or the admin will reply here.", "যেকোনো কিছু জিজ্ঞেস করুন — মেনু, অফার, খোলার সময়, বা আপনার অর্ডার। AI সহকারী বা অ্যাডমিন এখানেই জবাব দেবেন।")}</p>}
                 {messages.map((m) => (
                   <div key={m.id} style={{ alignSelf: m.author === "customer" ? "flex-end" : "flex-start", maxWidth: "85%", background: m.author === "customer" ? "var(--gold)" : "var(--surface)", color: m.author === "customer" ? "#fff" : "inherit", borderRadius: 12, padding: "8px 10px" }}>
-                    <span className="small" style={{ fontWeight: 700, opacity: 0.85 }}>{m.author === "ai" ? `🤖 ${m.authorName}` : m.author === "staff" ? `🏪 ${m.authorName || tr(lang, "Café Reza", "ক্যাফে রেজা")}` : tr(lang, "You", "আপনি")}</span>
+                    <span className="small" style={{ fontWeight: 700, opacity: 0.85 }}>{m.author === "ai" ? (<><img src="/img/logo.jpg" alt="" style={{ width: 18, height: 18, borderRadius: "50%", verticalAlign: "-4px", marginRight: 4 }} />{m.authorName}</>) : m.author === "staff" ? `🏪 ${m.authorName || tr(lang, "Café Reza", "ক্যাফে রেজা")}` : tr(lang, "You", "আপনি")}</span>
                     <p style={{ margin: "2px 0 0", fontSize: 14, whiteSpace: "pre-wrap" }}>{m.body}</p>
                   </div>
                 ))}
