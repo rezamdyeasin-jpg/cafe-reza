@@ -7,7 +7,9 @@
 // the cart themselves.
 //
 // The Gemini call is a plain fetch — no new dependency. The model is
-// gemini-2.5-flash (the owner's verified key). If the key is missing
+// gemini-3.5-flash (verified working with the owner's key on 5 Nov 2026;
+// gemini-2.5-flash returns 404 "no longer available to new users" and
+// gemini-flash-latest returns 503 high-demand). If the key is missing
 // or the call fails, the caller shows a polite note and the chat
 // still works — the admin always gets the customer's message.
 import type { Product, Settings } from "./db";
@@ -47,7 +49,7 @@ ${menu}
 
 export async function askAi(apiKey: string, systemPrompt: string, history: Array<{ role: "user" | "model"; text: string }>, question: string): Promise<{ ok: boolean; text?: string; error?: string }> {
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
