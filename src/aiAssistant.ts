@@ -12,17 +12,34 @@
 // gemini-flash-latest returns 503 high-demand). If the key is missing
 // or the call fails, the caller shows a polite note and the chat
 // still works — the admin always gets the customer's message.
-import type { Product, Settings } from "./db";
+import type { Order, Product, Settings } from "./db";
 
 // Build the AI's knowledge base from live data. The menu is built
 // from the actual products array (never a hard-coded list), and the
 // offers, delivery charge and loyalty values come from the live
 // settings, so the AI always says what the site currently shows.
-export function buildAiKnowledge(products: Product[], settings: Settings): string {
+// The signed-in customer's own recent orders are included too (only
+// theirs — never another customer's), so the AI can answer whether
+// an order was confirmed, what stage it is at, or if it was cancelled.
+export function buildAiKnowledge(products: Product[], settings: Settings, orders?: Order[]): string {
   const menu = products
     .filter((p) => p.available && p.price > 0)
-    .map((p) => `- ${p.nameEn} (${p.nameBn}) — ৳${p.price} [${p.categoryId}]`)
+    .map((p) => {
+      const bits = [`- ${p.nameEn} (${p.nameBn}) — ৳${p.price} [${p.categoryId}]`];
+      if (p.discountPrice != null && p.discountPrice > 0 && p.discountPrice < p.price) bits.push(`discount ৳${p.discountPrice}`);
+      bits.push(p.stock > 0 ? `in stock (${p.stock} left)` : "OUT OF STOCK");
+      if (p.description) bits.push(`— ${p.description}`);
+      if (p.spiceLevel) bits.push(`spice: ${p.spiceLevel}`);
+      if (p.veg) bits.push(p.veg);
+      if (p.ingredients) bits.push(`ingredients: ${p.ingredients}`);
+      return bits.join(" ");
+    })
     .join("\n");
+  const orderLines = (orders ?? []).slice(0, 10).map((o) => {
+    const items = o.items.map((it) => `${it.qty}× ${it.name}`).join(", ");
+    const when = o.createdAt ? new Date(o.createdAt).toLocaleString("en-GB") : "";
+    return `- ${o.orderNo} — status: ${o.status} — ${items} — total ৳${o.total} — ${o.paymentMethod} / ${o.paymentStatus}${o.orderType ? ` — ${o.orderType}` : ""}${when ? ` — ${when}` : ""}`;
+  }).join("\n");
   const redeemPoints = settings.loyaltyRedeemPoints || 100;
   const redeemValue = settings.loyaltyRedeemValue || 0;
   return `You are the AI assistant of Café Reza, a cafe in Comilla, Bangladesh, answering inside the cafe's own chatbox. Answer in the SAME language the customer writes in (Bengali if they write Bengali, English if they write English). Keep answers SHORT and helpful — one or two sentences when that is enough, a short list when the customer asks for options.
@@ -30,8 +47,11 @@ export function buildAiKnowledge(products: Product[], settings: Settings): strin
 FACTS — answer only from these. If the customer asks something not covered here, say you do not know and offer to connect them to the admin. NEVER invent a price, an offer, a time or any other fact.
 - Cafe: Café Reza. Address: Dhulipara Chawmuhani, EPZ road, Comilla, Bangladesh. Map: https://goo.gl/maps/iPaXfgRejF3aaPr1A. Phone: +880 1805-501689. This phone number has NO WhatsApp — never offer WhatsApp.
 - Opening hours: every day 4 PM – 12 AM (16:00–00:00).${settings.hours ? ` The cafe's own hours text: "${settings.hours}".` : ""}
-- MENU (the full live menu — prices in taka):
+- MENU (the full live menu — prices in taka; "OUT OF STOCK" means it cannot be ordered right now):
 ${menu}
+- YOUR ORDERS (the signed-in customer's own recent orders only — answer order questions ONLY from this list; never invent an order, a status or a total. If the order number is not here, say you cannot find it and suggest the Track page or the admin):
+${orderLines || "(no orders yet)"}
+- ORDER STATUSES (what each one means): Pending = placed, waiting for the cafe to confirm. Confirmed = the cafe confirmed it. Preparing = being made in the kitchen. Ready = ready for pickup/delivery. Out for Delivery = the rider is on the way. Delivered / Completed = done. Cancelled = cancelled (stock goes back). Refunded = money returned after admin approval.
 - OFFERS:
   * Combo: buy ${settings.comboMinQty ?? 4} or more of the SAME item and get ৳${settings.comboDiscount ?? 10} off that item, automatically at checkout. There is NO free-item offer — only money off.
   * Happy Hour: every day ${settings.happyHourStart ?? "16:00"}–${settings.happyHourEnd ?? "18:00"}: ${settings.happyHourPercent ?? 2}% off the whole order, automatically.
@@ -41,9 +61,9 @@ ${menu}
 - CANCELLING: a customer can cancel an order only within ${settings.cancelWindowMinutes ?? 2} minutes of placing it, from the Track page or My Account. After that only the admin can cancel — the customer should message the admin here in this chatbox.
 - PAYMENT: Cash on Delivery. Mobile payments (bKash/Nagad/Rocket) are manual only: the customer sends the money and shares the transaction ID at checkout. There is no online card payment yet.
 - HOW TO ORDER: browse the menu, tap a product, add it to the cart, then checkout from the cart. The order number appears after placing the order.
-- HOW TO TRACK: the Track page — search by order number. The order's status is shown there.
+- HOW TO TRACK: the Track page — search by order number. The order's status is shown there. You can also answer about the customer's own orders from YOUR ORDERS above (confirmed? what stage? cancelled?) — only from that list.
 - HOW TO RESERVE A TABLE: the Reserve page — pick a date, time and number of guests; the cafe confirms it.
-- WHAT YOU CANNOT DO: you cannot take money, give refunds, or fix a wrong order — those need the admin. If the customer asks for any of those, say so and offer to pass the message to the admin.
+- WHAT YOU CANNOT DO: you cannot take money, give refunds, or fix a wrong order — those need the admin. If the customer asks for any of those, say so and offer to pass the message to the admin. You also cannot see other customers' orders — only the signed-in customer's own orders listed above.
 - If the customer wants to order ("give me a cold coffee"), help them pick from the menu and tell them the price, but NEVER place an order yourself — they place it from the cart.`;
 }
 

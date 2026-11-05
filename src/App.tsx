@@ -1218,6 +1218,14 @@ function ChatBox({ fbUser, userDoc, products, settings, lang }: { fbUser: User |
     (id, d) => ({ id, author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), body: String(d.body ?? ""), createdAt: tsToIso(d.createdAt) }),
     [fbUser?.uid],
   );
+  // The signed-in customer's own recent orders, so the AI can answer
+  // whether an order was confirmed, what stage it is at, or if it was
+  // cancelled — only this customer's orders, never anyone else's.
+  const { data: myOrders } = useLive<Order>(
+    () => (firestore && fbUser ? query(collection(firestore, "orders"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc"), limit(20)) : null),
+    orderFromDoc,
+    [fbUser?.uid],
+  );
   useEffect(() => {
     if (!fbUser) { setLastRead(0); return; }
     try { setLastRead(Number(localStorage.getItem(`cr_chat_last_read_${fbUser.uid}`) ?? 0)); } catch { setLastRead(0); }
@@ -1246,7 +1254,7 @@ function ChatBox({ fbUser, userDoc, products, settings, lang }: { fbUser: User |
       } else {
         setAiBusy(true);
         const history = messages.filter((m) => m.author === "customer" || m.author === "ai").slice(-10).map((m) => ({ role: (m.author === "ai" ? "model" : "user") as "model" | "user", text: m.body }));
-        const r = await askAi(key, buildAiKnowledge(products, settings), history, text);
+        const r = await askAi(key, buildAiKnowledge(products, settings, myOrders), history, text);
         setAiBusy(false);
         if (r.ok && r.text) {
           await addDoc(collection(firestore, "messages"), { userId: fbUser.uid, guestName: "", guestPhone: "", orderNo: "", author: "ai", authorName: tr(lang, "AI Assistant", "AI সহকারী"), body: r.text, readFlag: false, createdAt: serverTimestamp() });
