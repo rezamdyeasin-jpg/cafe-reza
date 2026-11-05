@@ -646,7 +646,7 @@ function ContentTab({ userDoc, settings, lang }: { userDoc: UserDoc; settings: S
         <label>{tr(lang, "Announcement bar (shown on every customer page)", "ঘোষণা বার (সব কাস্টমার পেজে দেখায়)")}<input aria-label="Announcement" value={announcement} onChange={(e) => setAnnouncement(e.target.value)} /></label>
         <label>{tr(lang, "About text", "সম্পর্কে লেখা")}<textarea aria-label="About text" rows={3} value={aboutText} onChange={(e) => setAboutText(e.target.value)} /></label>
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={showGallery} onChange={(e) => setShowGallery(e.target.checked)} style={{ width: "auto" }} />{tr(lang, "Show gallery on the homepage", "হোমপেজে গ্যালারি দেখান")}</label>
-        <label>{tr(lang, "Homepage promo video", "হোমপেজের প্রোমো ভিডিও")}<select aria-label="Promo video" value={promoVideo} onChange={(e) => setPromoVideo(e.target.value)}><option value="main">Main promo</option><option value="a">Promo A</option><option value="b">Promo B</option><option value="none">No video (photo hero)</option></select></label>
+        <label>{tr(lang, "Homepage promo video", "হোমপেজের প্রোমো ভিডিও")}<select aria-label="Promo video" value={promoVideo} onChange={(e) => setPromoVideo(e.target.value)}><option value="main">Main promo (3 videos, one after another)</option><option value="a">Promo A</option><option value="b">Promo B</option><option value="none">No video (photo hero)</option></select></label>
         <b>{tr(lang, "Banner carousel (owner posters)", "ব্যানার ক্যারোসেল (মালিকের পোস্টার)")}</b>
         {BANNER_SLIDES.map((b) => (
           <label key={b.slug} style={{ display: "flex", gap: 8, alignItems: "center" }}>

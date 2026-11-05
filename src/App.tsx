@@ -228,22 +228,27 @@ function BannerCarousel({ products, onSelect, lang }: { products: Product[]; onS
   );
 }
 
-function PromoVideo({ src, label, poster, lang }: { src: string | null; label: string; poster?: string; lang: Lang }) {
-  // Big hero video: taller than before with rounded corners, so it reads
-  // as the page's main visual. Still silent autoplay loop, no controls.
+function PromoVideo({ srcs, label, poster, lang }: { srcs: string[]; label: string; poster?: string; lang: Lang }) {
+  // Hero ad: the promo videos play one after another, muted, no
+  // controls, no stopping — when the last one ends it starts over
+  // from the first, forever. A single video just loops itself.
   // preload="metadata": the page does not wait for the whole video
   // file before it becomes usable — the video still autoplays once
   // enough data has loaded. The old preload="auto" fetched the full
   // video eagerly and held the menu up behind it.
-  if (!src) return poster ? <img src={poster} alt={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000" }} /> : null;
-  return <video src={src} poster={poster} autoPlay muted loop playsInline disablePictureInPicture preload="metadata" aria-label={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000", pointerEvents: "none" }} />;
+  const list = srcs.filter(Boolean);
+  const [idx, setIdx] = useState(0);
+  if (list.length === 0) return poster ? <img src={poster} alt={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000" }} /> : null;
+  const src = list[idx % list.length];
+  return <video key={src} src={src} poster={poster} autoPlay muted loop={list.length === 1} playsInline disablePictureInPicture preload="metadata" onEnded={() => { if (list.length > 1) setIdx((i) => (i + 1) % list.length); }} aria-label={label} style={{ width: "100%", height: "min(56vw, 360px)", objectFit: "cover", display: "block", borderRadius: 12, background: "#000", pointerEvents: "none" }} />;
 }
 
-function promoSrc(choice: string | undefined): string | null {
-  if (choice === "a") return "/video/promo-a.mp4";
-  if (choice === "b") return "/video/promo-b.mp4";
-  if (choice === "none") return null;
-  return "/video/promo-main.mp4";
+function promoSrcs(choice: string | undefined): string[] {
+  if (choice === "a") return ["/video/promo-a.mp4"];
+  if (choice === "b") return ["/video/promo-b.mp4"];
+  if (choice === "none") return [];
+  // Default hero: the three promo videos, one after another.
+  return ["/video/promo-a.mp4", "/video/promo-c.mp4", "/video/promo-b.mp4"];
 }
 
 // Table QR handoff: a scanned table QR opens the menu with
@@ -527,6 +532,34 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   const [doneTotal, setDoneTotal] = useState(0);
   const [doneReceipt, setDoneReceipt] = useState<Order | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
+  const [locBusy, setLocBusy] = useState(false);
+  const [locMsg, setLocMsg] = useState("");
+  // Share current location: the browser asks for permission, then the
+  // address is filled from the GPS position (OpenStreetMap reverse
+  // geocoding, free, no key) with a Google Maps link the rider can
+  // open to navigate. The customer can still edit the address after.
+  const useMyLocation = () => {
+    if (!("geolocation" in navigator)) { setLocMsg(tr(lang, "Your device does not support location sharing.", "আপনার ডিভাইসে লোকেশন শেয়ার করা যায় না।")); return; }
+    setLocBusy(true); setLocMsg("");
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      const lat = pos.coords.latitude.toFixed(6);
+      const lng = pos.coords.longitude.toFixed(6);
+      const mapUrl = `https://maps.google.com/?q=${lat},${lng}`;
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18`);
+        if (res.ok) {
+          const d = (await res.json()) as { display_name?: string };
+          if (d.display_name) { setAddress(`${d.display_name} — Map: ${mapUrl}`); setLocMsg(tr(lang, "Location added.", "লোকেশন যোগ হয়েছে।")); setLocBusy(false); return; }
+        }
+      } catch { /* fall through to the map link */ }
+      setAddress(mapUrl);
+      setLocMsg(tr(lang, "Location added as a map link.", "লোকেশন ম্যাপ লিংক হিসেবে যোগ হয়েছে।"));
+      setLocBusy(false);
+    }, (e) => {
+      setLocBusy(false);
+      setLocMsg(e.code === 1 ? tr(lang, "Location permission was denied — allow it in your browser to share your location.", "লোকেশনের অনুমতি দেওয়া হয়নি — লোকেশন শেয়ার করতে ব্রাউজারে অনুমতি দিন।") : tr(lang, "Could not get your location. Try again.", "আপনার লোকেশন পাওয়া যায়নি। আবার চেষ্টা করুন।"));
+    }, { timeout: 15000 });
+  };
   useEffect(() => {
     if (open) {
       setStep("cart"); setErr(""); window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -703,6 +736,10 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
                     </select></label>
                   )}
                   <label>{tr(lang, "Delivery address", "ডেলিভারির ঠিকানা")}<input aria-label="Delivery address" required value={address} onChange={(e) => setAddress(e.target.value)} /></label>
+                  <div className="row" style={{ marginTop: 6 }}>
+                    <button type="button" className="btn-ghost" disabled={locBusy} onClick={useMyLocation}>{locBusy ? tr(lang, "Getting your location…", "আপনার লোকেশন নেওয়া হচ্ছে…") : `📍 ${tr(lang, "Use my current location", "আমার বর্তমান লোকেশন ব্যবহার করুন")}`}</button>
+                  </div>
+                  {locMsg && <p className="small" role="status" style={{ marginTop: 4 }}>{locMsg}</p>}
                 </>
               )}
               {orderType === "dine-in" && <label>{tr(lang, "Table", "টেবিল")}<input aria-label="Dine-in table" value={tableLabel} onChange={(e) => setTableLabel(e.target.value)} placeholder="T1" /></label>}
@@ -1635,7 +1672,7 @@ export function App() {
                 </div>
                 {settings.phone && <p style={{ marginTop: 10 }}>📞 <a href={`tel:${settings.phone.replace(/[^+\d]/g, "")}`}>{settings.phone}</a></p>}
               </div>
-              <PromoVideo src={promoSrc(settings.promoVideo)} label="Café Reza promo video" poster="/img/hero.jpg" lang={lang} />
+              <PromoVideo srcs={promoSrcs(settings.promoVideo)} label="Café Reza promo video" poster="/img/hero.jpg" lang={lang} />
             </div>
           </section>
 
