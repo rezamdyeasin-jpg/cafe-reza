@@ -1575,6 +1575,10 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
   const goOrders = (f: "all" | "pending" | "today") => { setOrdersFilter(f); setTab("orders"); };
   const [showAlerts, setShowAlerts] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  // Mobile View preview: the customer site inside a phone-sized frame,
+  // so the owner can check how the menu, hero video and checkout look
+  // on a phone without leaving the admin panel.
+  const [showMobilePreview, setShowMobilePreview] = useState(false);
   // Choosing any section closes the menu, however it was chosen (menu
   // item, tab chip or alert shortcut) — the menu must never stay open
   // after navigating to a section.
@@ -1644,6 +1648,7 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
         <div className="row">
           <button className="chip" onClick={() => { setShowMenu(!showMenu); setShowAlerts(false); }}>☰ {tr(lang, "Menu", "মেনু")}</button>
           <button className="chip" onClick={() => { setShowAlerts(!showAlerts); setShowMenu(false); }}>🔔 {tr(lang, "Alerts", "সতর্কতা")}{alertTotal > 0 ? ` (${alertTotal})` : ""}</button>
+          <button className="chip" onClick={() => { setShowMobilePreview(true); setShowMenu(false); setShowAlerts(false); }}>📱 {tr(lang, "Mobile View", "মোবাইল ভিউ")}</button>
           <button className="chip" aria-label="Switch language" onClick={onToggleLang}>{lang === "bn" ? "EN" : "বাংলা"}</button>
           <button className="chip" aria-label="Toggle theme" onClick={onToggleTheme}>{theme === "dark" ? "☀" : "☾"}</button>
         </div>
@@ -1687,6 +1692,21 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
                 <button className="btn-gold" style={{ display: "block", width: "100%" }} onClick={onBack}>🛍️ {tr(lang, "Go to shop", "দোকানে যান")}</button>
                 <button className="btn-ghost" style={{ display: "block", width: "100%", marginTop: 6 }} onClick={() => void signOutUser()}>{tr(lang, "Sign out", "সাইন-আউট")}</button>
               </div>
+            </div>
+          </div>
+        )}
+        {showMobilePreview && (
+          <div style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,.55)", display: "flex", flexDirection: "column", alignItems: "center", padding: 16, overflowY: "auto" }} onClick={() => setShowMobilePreview(false)}>
+            <div role="dialog" aria-label={tr(lang, "Mobile View", "মোবাইল ভিউ")} style={{ width: "min(400px, 100%)", display: "flex", flexDirection: "column", gap: 8 }} onClick={(e) => e.stopPropagation()}>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <b className="serif" style={{ fontSize: 18, color: "#fff" }}>📱 {tr(lang, "Mobile View", "মোবাইল ভিউ")}</b>
+                <button className="btn-ghost" aria-label={tr(lang, "Close", "বন্ধ করুন")} onClick={() => setShowMobilePreview(false)} style={{ color: "#fff" }}>✕</button>
+              </div>
+              <p className="small" style={{ color: "#fff", opacity: 0.85, margin: 0 }}>{tr(lang, "How the customer site looks on a phone. Tap inside the phone to browse it.", "ফোনে কাস্টমার সাইটটা কেমন দেখায়। ফোনের ভিতরে চাপ দিয়ে ঘুরে দেখুন।")}</p>
+              <div style={{ width: "100%", height: "min(720px, calc(100vh - 180px))", border: "10px solid #111", borderRadius: 28, overflow: "hidden", background: "#000", boxShadow: "0 12px 32px rgba(0,0,0,.5)" }}>
+                <iframe title={tr(lang, "Customer site mobile preview", "কাস্টমার সাইটের মোবাইল প্রিভিউ")} src="/#/" style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#fff" }} />
+              </div>
+              <button className="btn-gold" style={{ width: "100%" }} onClick={onBack}>🛍️ {tr(lang, "Open the full shop", "পুরো দোকান খুলুন")}</button>
             </div>
           </div>
         )}
