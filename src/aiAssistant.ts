@@ -47,7 +47,7 @@ ${menu}
 
 export async function askAi(apiKey: string, systemPrompt: string, history: Array<{ role: "user" | "model"; text: string }>, question: string): Promise<{ ok: boolean; text?: string; error?: string }> {
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(apiKey)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
