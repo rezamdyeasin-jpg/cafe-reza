@@ -82,7 +82,7 @@ export type Ticket = { id: string; userId: string; name: string; phone: string; 
 export type Review = { id: string; productId: string; author: string; rating: number; comment: string; status: string; createdAt: string };
 export type InventoryItem = { id: string; name: string; category: string; unit: string; quantity: number; lowAt: number; costPerUnit: number; expiry: string; supplier: string };
 export type Supplier = { id: string; name: string; phone: string; item: string; notes: string };
-export type Expense = { id: string; category: string; description: string; amount: number; date: string; createdAt: string };
+export type Expense = { id: string; category: string; description: string; amount: number; date: string; createdAt: string; supplier: string };
 export type TableDoc = { id: string; label: string; capacity: number; status: string; notes: string };
 export type RefundRequest = { id: string; orderId: string; orderNo: string; amount: number; reason: string; requestedBy: string; requestedByName: string; status: string; decidedBy: string; decidedByName: string; createdAt: string };
 
@@ -164,7 +164,12 @@ export function orderFromDoc(id: string, d: DocumentData): Order {
 }
 export function expenseFromDoc(id: string, d: DocumentData): Expense {
   const e = d as Partial<Expense> & { createdAt?: unknown };
-  return { id, category: e.category ?? "", description: e.description ?? "", amount: Number(e.amount ?? 0), date: e.date ?? "", createdAt: tsToIso(e.createdAt) };
+  return { id, category: e.category ?? "", description: e.description ?? "", amount: Number(e.amount ?? 0), date: e.date ?? "", createdAt: tsToIso(e.createdAt), supplier: e.supplier ?? "" };
+}
+
+export function supplierFromDoc(id: string, d: DocumentData): Supplier {
+  const s = d as Partial<Supplier>;
+  return { id, name: s.name ?? "", phone: s.phone ?? "", item: s.item ?? "", notes: s.notes ?? "" };
 }
 
 export function userFromDoc(id: string, d: DocumentData): UserDoc {
@@ -188,11 +193,55 @@ export function userFromDoc(id: string, d: DocumentData): UserDoc {
   };
 }
 
+export function useOnline(): boolean {
+  const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
+  return online;
+}
+
+// Offline menu: the last good catalog is saved to localStorage, so the
+// menu still renders when the network is slow or gone. The snapshot is
+// only used while the live catalog is empty (first load with no
+// network); once Firestore answers, live data wins. Orders and
+// checkout are never cached — they need the network.
+const CATALOG_CACHE_KEY = "cr_catalog_cache_v1";
+
 export function useCatalog() {
   const firestore = getDb();
   const cats = useLive<Category>(() => (firestore ? query(collection(firestore, "categories"), orderBy("sortOrder")) : null), categoryFromDoc);
   const prods = useLive<Product>(() => (firestore ? query(collection(firestore, "products"), orderBy("sortOrder")) : null), productFromDoc);
-  return { categories: cats.data, products: prods.data, loading: cats.loading || prods.loading, error: cats.error || prods.error };
+  const online = useOnline();
+  const [cached, setCached] = useState<{ categories: Category[]; products: Product[] } | null>(() => {
+    try {
+      const raw = localStorage.getItem(CATALOG_CACHE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { categories?: unknown; products?: unknown };
+      if (!Array.isArray(parsed.categories) || !Array.isArray(parsed.products)) return null;
+      return parsed as { categories: Category[]; products: Product[] };
+    } catch { return null; }
+  });
+  useEffect(() => {
+    if (cats.data.length > 0 && prods.data.length > 0) {
+      const snap = { categories: cats.data, products: prods.data };
+      setCached(snap);
+      try { localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify(snap)); } catch { /* storage full/blocked — the offline menu just won't persist */ }
+    }
+  }, [cats.data, prods.data]);
+  const usingCache = cats.data.length === 0 && prods.data.length === 0 && cached !== null;
+  return {
+    categories: usingCache ? cached.categories : cats.data,
+    products: usingCache ? cached.products : prods.data,
+    loading: cats.loading || prods.loading,
+    error: cats.error || prods.error,
+    offline: !online,
+    usingCache,
+  };
 }
 export function useSettingsDoc() {
   return useLiveDoc<Settings>("settings/cafe", settingsFromDoc, { ...DEFAULT_SETTINGS });

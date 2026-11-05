@@ -34,7 +34,7 @@ import { InstallAppCard } from "./InstallAppCard";
 import { AdminPanel } from "./AdminPanel";
 
 export type CartItem = { productId: string; qty: number; size: string; sugar: string; milk: string; note: string };
-type View = "store" | "track" | "reserve" | "account" | "admin" | "info";
+type View = "store" | "track" | "reserve" | "account" | "admin" | "info" | "refund" | "delivery" | "privacy";
 
 const tk = (n: number) => `৳${n.toLocaleString("en-US")}`;
 const imgSrc = (key: string | null | undefined) => (key ? `/img/${key}` : "");
@@ -244,6 +244,17 @@ function promoSrc(choice: string | undefined): string | null {
   if (choice === "b") return "/video/promo-b.mp4";
   if (choice === "none") return null;
   return "/video/promo-main.mp4";
+}
+
+// Table QR handoff: a scanned table QR opens the menu with
+// ?table=T1 in the hash (e.g. https://cafe-reza.web.app/#/?table=T1).
+// The label is validated (letters, digits, dash, max 12 chars) so a
+// crafted link cannot inject anything into the checkout form.
+function tableParamFromHash(): string {
+  if (typeof window === "undefined") return "";
+  const q = (window.location.hash || "").split("?")[1] || "";
+  const t = (new URLSearchParams(q).get("table") || "").trim().toUpperCase();
+  return /^[A-Z0-9-]{1,12}$/.test(t) ? t : "";
 }
 
 function AdSlotView({ slotId, adsJson }: { slotId: string; adsJson?: string | null }) {
@@ -494,9 +505,10 @@ function DetailModal({ p, categories, lang, onClose, onAdd, wishlisted, onWish, 
   );
 }
 
-function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, userDoc, lang }: {
+function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, userDoc, lang, initialTable }: {
   open: boolean; onClose: () => void; cart: CartItem[]; setCart: (c: CartItem[]) => void;
   products: Product[]; settings: Settings; fbUser: User | null; userDoc: UserDoc | null; lang: Lang;
+  initialTable?: string;
 }) {
   const [step, setStep] = useState<"cart" | "checkout" | "done">("cart");
   const [name, setName] = useState("");
@@ -518,6 +530,13 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   useEffect(() => {
     if (open) {
       setStep("cart"); setErr(""); window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      // Table QR handoff: a scanned table QR opens the menu with
+      // ?table=T1 in the URL — prefill dine-in with that table, but
+      // only when the customer has not already picked a table.
+      if (initialTable) {
+        if (tableLabel === "") setOrderType("dine-in");
+        setTableLabel((v) => (v === "" ? initialTable : v));
+      }
       // Coupon wallet handoff: the Account "Use coupon" button stores
       // the code and opens the cart — pick it up once, then clear it.
       try {
@@ -529,7 +548,7 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
         }
       } catch { /* wallet handoff is best-effort */ }
     }
-  }, [open ]);
+  }, [open, initialTable ]);
   // Prefill only empty fields: never overwrite what the user already typed.
   // The old unconditional fill wiped a typed phone number whenever the
   // profile snapshot re-fired while the drawer was open.
@@ -1060,13 +1079,14 @@ function AccountView({ fbUser, userDoc, products, settings, lang, onLoginSuccess
   );
 }
 
-function InfoView({ settings, lang }: { settings: Settings; lang: Lang }) {
+function InfoView({ settings, lang, onPolicy }: { settings: Settings; lang: Lang; onPolicy?: (v: "refund" | "delivery" | "privacy") => void }) {
   const content = parseContent(settings.contentJson);
   let hours: Array<{ day: string; open: string; close: string; closed?: boolean }> = [];
   try { const raw = JSON.parse(settings.hoursJson || "[]") as unknown; hours = Array.isArray(raw) ? raw as typeof hours : []; } catch { hours = []; }
   return (
     <div>
-      <h2 className="serif" style={{ fontSize: 22 }}>{settings.cafeName}</h2>
+      <div className="logo-tile" style={{ width: 88, height: 88 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></div>
+      <h2 className="serif" style={{ fontSize: 22, marginTop: 10 }}>{settings.cafeName}</h2>
       <p className={`muted ${taglineClass(lang)}`} style={{ fontSize: 17 }}>{taglineText(settings, lang)}</p>
       {content.aboutText && <p style={{ marginTop: 8 }}>{content.aboutText}</p>}
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
@@ -1089,7 +1109,62 @@ function InfoView({ settings, lang }: { settings: Settings; lang: Lang }) {
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Policies", "নীতিমালা")}</b>
         <p className="small" style={{ marginTop: 6 }}>{tr(lang, "Pending/Confirmed orders can be cancelled with stock restored. Mobile payments stay “Pending verification” until verified — never auto-marked paid. Prices follow the printed menu; items without a price stay unorderable until a price is set.", "অপেক্ষমাণ/নিশ্চিত অর্ডার স্টক ফিরিয়ে বাতিল করা যায়। মোবাইল পেমেন্ট যাচাই না করা পর্যন্ত “যাচাইয়ের অপেক্ষায়” থাকে — কখনো স্বয়ংক্রিয়ভাবে পরিশোধিত ধরা হয় না। দাম ছাপা মেনু অনুযায়ী; দাম ছাড়া আইটেম দাম না বসানো পর্যন্ত অর্ডার করা যায় না।")}</p>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="chip" onClick={() => onPolicy?.("refund")}>{tr(lang, "Refund Policy", "ফেরত নীতিমালা")}</button>
+          <button className="chip" onClick={() => onPolicy?.("delivery")}>{tr(lang, "Delivery Policy", "ডেলিভারি নীতিমালা")}</button>
+          <button className="chip" onClick={() => onPolicy?.("privacy")}>{tr(lang, "Privacy Policy", "গোপনীয়তা নীতিমালা")}</button>
+        </div>
       </div>
+    </div>
+  );
+}
+
+// Customer-facing policy pages (footer links). Every number comes
+// from live Settings — delivery fee, free-delivery threshold, cancel
+// window, prep/delivery minutes, hours, phone and address — so the
+// text stays true when the owner changes a setting in the admin panel.
+function PolicyView({ policy, settings, lang, onBack }: { policy: "refund" | "delivery" | "privacy"; settings: Settings; lang: Lang; onBack: () => void }) {
+  const title = policy === "refund" ? tr(lang, "Refund Policy", "ফেরত নীতিমালা") : policy === "delivery" ? tr(lang, "Delivery Policy", "ডেলিভারি নীতিমালা") : tr(lang, "Privacy Policy", "গোপনীয়তা নীতিমালা");
+  const cancelMin = settings.cancelWindowMinutes ?? 2;
+  const eta = (settings.prepMinutes ?? 20) + (settings.deliveryMinutes ?? 20);
+  return (
+    <div>
+      <button className="chip" onClick={onBack}>← {tr(lang, "Menu", "মেনু")}</button>
+      <h1 className="serif" style={{ fontSize: 26, marginTop: 12 }}>{title}</h1>
+      <p className="muted">{settings.cafeName} • {settings.address}</p>
+      {policy === "refund" && (
+        <div className="card" style={{ padding: 16 }}>
+          <p>{tr(lang, "Payment here is Cash on Delivery (or cash at the counter for dine-in and takeaway) — no advance payment is collected online, so a cancelled order has nothing to refund.", "এখানে পেমেন্ট ক্যাশ অন ডেলিভারি (ডাইন-ইন ও টেকঅ্যাওয়ের জন্য কাউন্টারে নগদ) — অনলাইনে আগাম টাকা নেওয়া হয় না, তাই বাতিল করা অর্ডারে ফেরত দেওয়ার কিছু থাকে না।")}</p>
+          <ul>
+            <li>{tr(lang, `You can cancel your own order within ${cancelMin} minutes of placing it, while it is still Pending or Confirmed. After that only the cafe can cancel it — write in the in-app chat or call us.`, `অর্ডার দেওয়ার ${cancelMin} মিনিটের মধ্যে, যতক্ষণ তা অপেক্ষমাণ বা নিশ্চিত অবস্থায় আছে, আপনি নিজে বাতিল করতে পারবেন। এরপর শুধু ক্যাফেই বাতিল করতে পারবে — ইন-অ্যাপ চ্যাটে লিখুন বা ফোন করুন।`)}</li>
+            <li>{tr(lang, "A cancelled order is never charged. If you already paid by mobile payment (bKash, Nagad or Rocket), the payment stays “Pending verification” until our staff verifies it — it is never auto-marked paid.", "বাতিল করা অর্ডারে কখনো চার্জ করা হয় না। মোবাইল পেমেন্টে (বিকাশ, নগদ বা রকেট) টাকা দিয়ে থাকলে তা কর্মীরা যাচাই না করা পর্যন্ত “যাচাইয়ের অপেক্ষায়” থাকে — কখনো স্বয়ংক্রিয়ভাবে পরিশোধিত ধরা হয় না।")}</li>
+            <li>{tr(lang, "A refund is given only after the cafe admin approves it. When an approved refund is due — for example a verified mobile payment for a cancelled order, or a wrong or damaged item — it is returned through the same channel you paid with.", "ফেরত দেওয়া হয় শুধু ক্যাফের অ্যাডমিন অনুমোদন করলে। অনুমোদিত ফেরত পাওনা হলে — যেমন বাতিল অর্ডারের যাচাই করা মোবাইল পেমেন্ট, বা ভুল/নষ্ট খাবার — তা আপনি যেভাবে দিয়েছেন সেই একই মাধ্যমে ফেরত দেওয়া হয়।")}</li>
+            <li>{tr(lang, "Got a wrong or damaged item? Tell us in the in-app chat or by phone with your order number — the admin decides a replacement or a refund.", "ভুল বা নষ্ট খাবার পেলে অর্ডার নম্বরসহ ইন-অ্যাপ চ্যাটে বা ফোনে জানান — অ্যাডমিন বদলে দেওয়া বা ফেরতের সিদ্ধান্ত নেবেন।")}</li>
+          </ul>
+        </div>
+      )}
+      {policy === "delivery" && (
+        <div className="card" style={{ padding: 16 }}>
+          <ul>
+            <li>{tr(lang, `Delivery charge is ${tk(settings.deliveryFee)} per order, and free for orders of ${tk(settings.freeDeliveryAt)} or more. The exact charge is shown at checkout before you confirm.`, `ডেলিভারি চার্জ প্রতি অর্ডারে ${tk(settings.deliveryFee)}, আর ${tk(settings.freeDeliveryAt)} বা তার বেশি অর্ডারে ফ্রি। নিশ্চিত করার আগে চেকআউটে সঠিক চার্জ দেখানো হয়।`)}</li>
+            <li>{tr(lang, `Delivery usually takes about ${eta} minutes after you order (kitchen prep plus rider time). You can follow the order live on the Track page.`, `অর্ডারের পর ডেলিভারিতে সাধারণত প্রায় ${eta} মিনিট লাগে (রান্নার সময় + রাইডারের সময়)। ট্র্যাক পেজে অর্ডারটি লাইভ দেখতে পারবেন।`)}</li>
+            <li>{tr(lang, `Opening hours: ${settings.hours || "4 PM – 12 AM, every day"}. Orders are taken only while the cafe is open.`, `খোলার সময়: ${settings.hours || "প্রতিদিন বিকাল ৪টা – রাত ১২টা"}। ক্যাফে খোলা থাকলেই অর্ডার নেওয়া হয়।`)}</li>
+            <li>{tr(lang, "Delivery orders are paid Cash on Delivery. Dine-in and takeaway are also available — dine-in from a table QR, or pick a table at checkout.", "ডেলিভারি অর্ডারের পেমেন্ট ক্যাশ অন ডেলিভারি। ডাইন-ইন ও টেকঅ্যাওয়েও আছে — টেবিলের QR থেকে ডাইন-ইন করুন, বা চেকআউটে টেবিল বেছে নিন।")}</li>
+            <li>{tr(lang, "Please give a complete delivery address and a reachable phone number, so the rider can find you.", "সঠিক ডেলিভারি ঠিকানা ও পৌঁছানো যায় এমন ফোন নম্বর দিন, যাতে রাইডার আপনাকে খুঁজে পায়।")}</li>
+          </ul>
+        </div>
+      )}
+      {policy === "privacy" && (
+        <div className="card" style={{ padding: 16 }}>
+          <ul>
+            <li>{tr(lang, "We collect only what an order needs: your name, phone number and delivery address, your order history and saved addresses, and the messages you send in the in-app chat. Signing in is by Google, Facebook or phone number only.", "অর্ডারের জন্য যা দরকার শুধু তাই নেওয়া হয়: আপনার নাম, ফোন নম্বর ও ডেলিভারি ঠিকানা, অর্ডারের ইতিহাস ও সংরক্ষিত ঠিকানা, আর ইন-অ্যাপ চ্যাটে পাঠানো মেসেজ। সাইন-ইন শুধু Google, Facebook বা ফোন নম্বরে।")}</li>
+            <li>{tr(lang, "Your details are used only to take, prepare and deliver your order and to reply to your messages. They are never sold, and never shown publicly — the chat is private between you and the cafe staff.", "আপনার তথ্য শুধু অর্ডার নেওয়া, তৈরি করা, ডেলিভারি দেওয়া আর মেসেজের উত্তর দেওয়ার কাজে ব্যবহৃত হয়। তা কখনো বিক্রি করা হয় না, আর প্রকাশ্যে দেখানোও হয় না — চ্যাট শুধু আপনার আর ক্যাফের কর্মীদের মধ্যে।")}</li>
+            <li>{tr(lang, "You can download your own data anytime from the Account page.", "অ্যাকাউন্ট পেজ থেকে আপনি যেকোনো সময় নিজের ডেটা ডাউনলোড করতে পারবেন।")}</li>
+            <li>{tr(lang, "If you have a question about your data, write in the in-app chat or call the cafe — we will answer it.", "নিজের ডেটা নিয়ে কোনো প্রশ্ন থাকলে ইন-অ্যাপ চ্যাটে লিখুন বা ক্যাফেতে ফোন করুন — আমরা উত্তর দেব।")}</li>
+          </ul>
+        </div>
+      )}
+      {settings.phone && <p style={{ marginTop: 12 }}>📞 <a href={`tel:${settings.phone.replace(/[^+\d]/g, "")}`}>{settings.phone}</a></p>}
     </div>
   );
 }
@@ -1227,6 +1302,11 @@ export function App() {
   const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("cr_lang") === "en" ? "en" : "bn"));
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [view, setView] = useState<View>("store");
+  // Table QR handoff: a scanned table QR opens the menu with
+  // ?table=T1 in the hash (e.g. #/?table=T1). The label is validated
+  // (letters, digits, dash, max 12 chars) so a crafted link cannot
+  // inject anything into the checkout form.
+  const [qrTable, setQrTable] = useState(() => tableParamFromHash());
   const [fbUser, setFbUser] = useState<User | null>(null);
   // Auth restore is async: until the first onAuthStateChanged fires we
   // do NOT know whether anyone is signed in, so the admin panel must
@@ -1266,7 +1346,8 @@ export function App() {
     const apply = () => {
       const h = window.location.hash.replace(/^#\/?/, "");
       const head = h.split("/")[0];
-      setView(head === "admin" ? "admin" : head === "track" ? "track" : head === "reserve" ? "reserve" : head === "account" ? "account" : head === "about" ? "info" : "store");
+      setView(head === "admin" ? "admin" : head === "track" ? "track" : head === "reserve" ? "reserve" : head === "account" ? "account" : head === "about" ? "info" : head === "refund" ? "refund" : head === "delivery" ? "delivery" : head === "privacy" ? "privacy" : "store");
+      setQrTable(tableParamFromHash());
     };
     apply();
     window.addEventListener("hashchange", apply);
@@ -1302,7 +1383,7 @@ export function App() {
     return unsub;
   }, [fbUser]);
 
-  const { categories, products, loading: catalogLoading, error: catalogError } = useCatalog();
+  const { categories, products, loading: catalogLoading, error: catalogError, offline: isOffline } = useCatalog();
   const { data: settings } = useSettingsDoc();
   // Approved reviews only — the average per product shown on menu
   // cards comes from these real, staff-approved reviews.
@@ -1417,7 +1498,9 @@ export function App() {
           <InstallAppCard variant="customer" lang={lang} />
         </main>
       ) : view === "info" ? (
-        <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><InfoView settings={settings} lang={lang} /></main>
+        <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><InfoView settings={settings} lang={lang} onPolicy={(v) => navigate(v)} /></main>
+      ) : view === "refund" || view === "delivery" || view === "privacy" ? (
+        <main className="wrap" style={{ marginTop: 14, maxWidth: 720 }}><PolicyView policy={view} settings={settings} lang={lang} onBack={() => navigate("store")} /></main>
       ) : (
         <main className="wrap">
           <section className="card" style={{ marginTop: 14, overflow: "hidden" }}>
@@ -1427,6 +1510,12 @@ export function App() {
                 <h1 className="serif" style={{ fontSize: 32, marginTop: 10 }}>{settings.cafeName}</h1>
                 <p className={`muted ${taglineClass(lang)}`} style={{ fontSize: 20, fontWeight: 700 }}>{taglineText(settings, lang)}</p>
                 <div className="row" style={{ marginTop: 10 }}><OpenNowBadge settings={settings} lang={lang} /></div>
+                {qrTable && (
+                  <div className="row" style={{ marginTop: 10 }}>
+                    <span className="chip chip-on" style={{ fontWeight: 700 }}>🪑 {tr(lang, `Table ${qrTable} — dine-in`, `টেবিল ${qrTable} — ডাইন-ইন`)}</span>
+                    <button className="chip" onClick={() => navigate("store")}>{tr(lang, "Clear table", "টেবিল সরান")}</button>
+                  </div>
+                )}
                 <p style={{ marginTop: 8 }}>{tr(lang, "Order from your phone — delivery, takeaway or dine-in. Prices follow the owner's printed menu.", "মোবাইল থেকে অর্ডার করুন — ডেলিভারি, টেকঅ্যাওয়ে বা ডাইন-ইন। দাম মালিকের ছাপা মেনু অনুযায়ী।")}</p>
                 <div className="row" style={{ marginTop: 12 }}>
                   <input aria-label={tr(lang, "Search menu", "মেনু খুঁজুন")} placeholder={tr(lang, "Search the menu…", "মেনু খুঁজুন…")} value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />
@@ -1452,6 +1541,11 @@ export function App() {
           <div className="row" style={{ marginTop: 8 }}>
             {(["all", "best", "featured", "new"] as const).map((f) => <button key={f} className={`chip ${filter === f ? "chip-on" : ""}`} onClick={() => setFilter(f)}>{f === "all" ? tr(lang, "All", "সব") : f === "best" ? tr(lang, "Best seller", "বেস্ট সেলার") : f === "featured" ? tr(lang, "Featured", "ফিচার্ড") : tr(lang, "New", "নতুন")}</button>)}
           </div>
+          {isOffline && (
+            <p className="small text-center" role="status" style={{ marginTop: 12, color: "var(--accent)", fontWeight: 600 }}>
+              📶 {tr(lang, "You are offline — showing the saved menu. Prices and availability may be older; placing an order needs the network.", "আপনি অফলাইনে — সংরক্ষিত মেনু দেখানো হচ্ছে। দাম ও স্টক পুরনো হতে পারে; অর্ডার দিতে নেট লাগবে।")}
+            </p>
+          )}
 
           <div id="menu-list" className="grid products" style={{ marginTop: 14 }}>
             {filtered.map((p) => (
@@ -1526,7 +1620,7 @@ export function App() {
           fbUser={fbUser} userDoc={userDoc}
         />
       )}
-      <CartDrawer open={cartOpen} onClose={() => setCartOpen(false)} cart={cart} setCart={setCart} products={products} settings={settings} fbUser={fbUser} userDoc={userDoc} lang={lang} />
+      <CartDrawer open={cartOpen} onClose={() => setCartOpen(false)} cart={cart} setCart={setCart} products={products} settings={settings} fbUser={fbUser} userDoc={userDoc} lang={lang} initialTable={qrTable} />
 
       {view !== "admin" && (<footer className="wrap" style={{ marginTop: 28 }}>
         <div className="card" style={{ padding: 16, display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
@@ -1536,6 +1630,13 @@ export function App() {
             <p className={`small muted ${taglineClass(lang)}`} style={{ margin: 0 }}>{taglineText(settings, lang)}</p>
             <p className="small" style={{ margin: "4px 0 0" }}>{settings.address}</p>
             <p className="small" style={{ margin: 0 }}>{tr(lang, "Call:", "কল করুন:")} <a href={`tel:${settings.phone.replace(/[^+\d]/g, "")}`}>{settings.phone}</a> • <a href={settings.facebook} target="_blank" rel="noreferrer">Facebook</a> • <a href={MAPS_LINK} target="_blank" rel="noopener">{tr(lang, "Get Directions", "দিকনির্দেশনা নিন")}</a></p>
+            <p className="small" style={{ margin: "6px 0 0" }}>
+              <button type="button" onClick={() => navigate("refund")} style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer", textDecoration: "underline", fontSize: "inherit" }}>{tr(lang, "Refund Policy", "ফেরত নীতিমালা")}</button>
+              {" • "}
+              <button type="button" onClick={() => navigate("delivery")} style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer", textDecoration: "underline", fontSize: "inherit" }}>{tr(lang, "Delivery Policy", "ডেলিভারি নীতিমালা")}</button>
+              {" • "}
+              <button type="button" onClick={() => navigate("privacy")} style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer", textDecoration: "underline", fontSize: "inherit" }}>{tr(lang, "Privacy Policy", "গোপনীয়তা নীতিমালা")}</button>
+            </p>
           </div>
         </div>
         <p className="small muted text-center" style={{ marginTop: 10 }}>BDT (৳) • Asia/Dhaka • {tr(lang, "Mobile payments stay “Pending verification” until verified.", "মোবাইল পেমেন্ট যাচাই না করা পর্যন্ত “যাচাইয়ের অপেক্ষায়” থাকে।")}</p>

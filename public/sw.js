@@ -1,7 +1,11 @@
 /* Café Reza — minimal service worker (installability + static cache).
    Only same-origin GET requests are cached. Firestore / Auth calls are
-   cross-origin, so they always go to the network and are never cached. */
-const CACHE = "cafe-reza-v1";
+   cross-origin, so they always go to the network and are never cached.
+   The menu works offline: the app shell is cached at install, product
+   images are cached on first load (cache-first below), and the last
+   good catalog is saved to localStorage by the app (see useCatalog).
+   Orders and checkout are never cached — they need the network. */
+const CACHE = "cafe-reza-v2";
 const SHELL = ["/", "/index.html", "/img/logo.jpg"];
 
 self.addEventListener("install", (e) => {
@@ -31,6 +35,26 @@ self.addEventListener("fetch", (e) => {
           return res;
         })
         .catch(() => caches.match("/index.html")),
+    );
+    return;
+  }
+  // Product/menu images: cache-first — the menu must render when the
+  // network is slow or gone. A cached image is served at once and
+  // refreshed in the background when the network answers.
+  if (url.pathname.startsWith("/img/")) {
+    e.respondWith(
+      caches.match(req).then((hit) => {
+        const net = fetch(req)
+          .then((res) => {
+            if (res.ok) {
+              const copy = res.clone();
+              caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => undefined);
+            }
+            return res;
+          })
+          .catch(() => hit);
+        return hit || net;
+      }),
     );
     return;
   }

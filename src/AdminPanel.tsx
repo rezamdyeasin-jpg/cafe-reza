@@ -16,16 +16,32 @@ import { getDb, probeFirestore, signOutUser } from "./firebase";
 import { BANNER_SLIDES, CUSTOMER_EMAIL, OWNER_EMAIL, SEED_PRODUCTS } from "./seed";
 import {
   AD_SLOT_DEFS, expenseFromDoc, isStaffRole, orderFromDoc, ORDER_STATUSES, parseAds, parseBannerSelection, parseContent,
-  tr, tsToIso, useLive, userFromDoc,
-  type AuditLogEntry, type Category, type Coupon, type Expense, type Lang, type Order, type Product, type Reservation, type Settings, type UserDoc,
+  supplierFromDoc, tr, tsToIso, useLive, userFromDoc,
+  type AuditLogEntry, type Category, type Coupon, type Expense, type Lang, type Order, type Product, type Reservation, type Settings, type Supplier, type UserDoc,
 } from "./db";
 import { cancelOrderTx, comboDiscount, COMBO_DISCOUNT_PER_LINE, COMBO_MIN_QTY, HAPPY_HOUR_END, HAPPY_HOUR_PERCENT, HAPPY_HOUR_START, happyHourDiscount, placeOrderTx, timeToMin } from "./orders";
 import { InstallAppCard } from "./InstallAppCard";
 import { DigitalAnalyzer } from "./DigitalAnalyzer";
 import { ReceiptModal } from "./Receipt";
+import { QrCode } from "./QrCode";
+import { qrSvgString, tableQrUrl } from "./qr";
 import { computePhoneStats, normalizePhone, phoneQueryVariants, trustColor, trustLabel, trustLevel, type PhoneStats } from "./phoneTrust";
 
 const tk = (n: number) => `৳${n.toLocaleString("en-US")}`;
+
+// Table QR print: opens a small printable page with the table QR so
+// staff can print it and stick it on the table. window.print() runs
+// on load; the window stays open for the user to close. The label is
+// escaped — it comes from Firestore and is printed as text, never HTML.
+function printTableQr(label: string) {
+  const url = tableQrUrl(label);
+  const esc = label.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
+  const w = window.open("", "_blank", "width=480,height=640");
+  if (!w) return;
+  const svg = qrSvgString(url, 260);
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Table ${esc} — Café Reza</title><style>body{font-family:sans-serif;text-align:center;padding:24px;color:#3B2314}h1{font-size:30px;margin:14px 0 4px}p{margin:6px 0}.url{font-size:13px;color:#6b4a2f;word-break:break-all}</style></head><body>${svg}<h1>Table ${esc}</h1><p>Scan to open the menu &amp; order</p><p>মেনু খুলে অর্ডার করতে স্ক্যান করুন</p><p class="url">${url}</p><p>Café Reza — ক্যাফে রেজা</p><script>window.onload=function(){window.print()}</script></body></html>`);
+  w.document.close();
+}
 
 // Phone trust badge: the number's cancel rate from real orders, with
 // the trust label from the admin's thresholds (Settings → risk*Pct).
@@ -534,8 +550,21 @@ function ReservationsTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
         </div>
       ))}
       <h4 className="serif" style={{ fontSize: 18, marginTop: 18 }}>{tr(lang, "Tables", "টেবিল")}</h4>
+      <p className="small muted">{tr(lang, "Each table has a QR code. Print it and stick it on the table — scanning opens the menu with that table pre-selected for dine-in.", "প্রতিটি টেবিলের একটি QR কোড আছে। প্রিন্ট করে টেবিলে লাগান — স্ক্যান করলে ওই টেবিল ডাইন-ইনের জন্য আগে থেকে বসানো মেনু খুলবে।")}</p>
       {tables.length === 0 && <p className="muted small">{tr(lang, "No tables yet — add one below.", "এখনো কোনো টেবিল নেই — নিচে টেবিল যোগ করুন।")}</p>}
-      {tables.map((t) => <p key={t.id} className="small">{t.label} • {t.capacity} {tr(lang, "seats", "আসন")} • {t.status} <button className="btn-danger" style={{ padding: "2px 8px", marginLeft: 8 }} onClick={() => { if (firestore) void deleteDoc(doc(firestore, "tables", t.id)); }}>{tr(lang, "Delete", "মুছুন")}</button></p>)}
+      {tables.map((t) => (
+        <div key={t.id} className="card" style={{ padding: 12, marginTop: 10, display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+          <QrCode text={tableQrUrl(t.label)} size={120} title={`Table ${t.label} QR code`} />
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <b>{t.label}</b> • {t.capacity} {tr(lang, "seats", "আসন")} • {t.status}
+            <p className="small muted" style={{ margin: "6px 0 0", wordBreak: "break-all" }}>{tableQrUrl(t.label)}</p>
+            <div className="row" style={{ marginTop: 8 }}>
+              <button className="btn-gold" style={{ padding: "6px 10px" }} onClick={() => printTableQr(t.label)}>🖨️ {tr(lang, "Print QR", "QR প্রিন্ট করুন")}</button>
+              <button className="btn-danger" style={{ padding: "6px 10px" }} onClick={() => { if (firestore) void deleteDoc(doc(firestore, "tables", t.id)); }}>{tr(lang, "Delete", "মুছুন")}</button>
+            </div>
+          </div>
+        </div>
+      ))}
       <div className="row">
         <input aria-label="New table label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="T1" style={{ flex: 1 }} />
         <input aria-label="Table capacity" type="number" value={capacity} onChange={(e) => setCapacity(Number(e.target.value))} style={{ width: 90 }} />
@@ -980,9 +1009,95 @@ function InventoryTab({ userDoc, lang }: { userDoc: UserDoc; lang: Lang }) {
 }
 
 function FirebaseTab({ userDoc, lang, onSeed, seedBusy, seedMsg }: { userDoc: UserDoc; lang: Lang; onSeed: () => void; seedBusy: boolean; seedMsg: string }) {
+  const firestore = getDb();
   const [probe, setProbe] = useState<{ state: string; detail: string } | null>(null);
   const [probing, setProbing] = useState(false);
   const check = async () => { setProbing(true); setProbe(await probeFirestore()); setProbing(false); };
+  // ---- Data backup (owner only tab) ----
+  // Export reads every collection as it is right now and downloads it
+  // as one JSON file. Firestore Timestamps become ISO strings, so the
+  // file is plain JSON. Restore writes it back — but ONLY the
+  // admin-writable collections (products, categories, coupons,
+  // settings, tables, suppliers, expenses, inventory). Orders,
+  // reservations, users, messages, reviews and audit logs are exported
+  // for safekeeping but are NOT restored from the browser: the rules
+  // forbid creating another customer's order from the client, and
+  // restoring them would rewrite other people's data.
+  const [backupMsg, setBackupMsg] = useState("");
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [restoreFile, setRestoreFile] = useState<{ name: string; collections: Record<string, Array<{ id: string; data: Record<string, unknown> }>> } | null>(null);
+  const toPlain = (v: unknown): unknown => {
+    if (v === null || v === undefined) return v;
+    if (typeof (v as { toDate?: unknown })?.toDate === "function") return (v as { toDate: () => Date }).toDate().toISOString();
+    if (Array.isArray(v)) return v.map(toPlain);
+    if (typeof v === "object") { const out: Record<string, unknown> = {}; for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = toPlain(val); return out; }
+    return v;
+  };
+  const fromPlain = (docData: Record<string, unknown>): Record<string, unknown> => {
+    const out = { ...docData };
+    for (const k of ["createdAt", "updatedAt", "reminderAt"]) {
+      const v = out[k];
+      if (typeof v === "string" && !Number.isNaN(Date.parse(v))) out[k] = new Date(v);
+    }
+    return out;
+  };
+  const exportBackup = async () => {
+    if (!firestore) return;
+    setBackupBusy(true); setBackupMsg(""); setRestoreFile(null);
+    try {
+      const names = ["products", "categories", "orders", "coupons", "users", "settings", "reservations", "tables", "suppliers", "expenses", "reviews", "inventory", "auditLogs", "messages"];
+      const collections: Record<string, Array<{ id: string; data: unknown }>> = {};
+      for (const name of names) {
+        const snap = await getDocs(collection(firestore, name));
+        collections[name] = snap.docs.map((d) => ({ id: d.id, data: toPlain(d.data()) }));
+      }
+      const total = Object.values(collections).reduce((n, arr) => n + arr.length, 0);
+      const blob = new Blob([JSON.stringify({ app: "cafe-reza", version: 1, exportedAt: new Date().toISOString(), collections }, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `cafe-reza-backup-${todayKey()}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      audit(userDoc, "backup.export", `${total} docs`);
+      setBackupMsg(tr(lang, `Backup downloaded — ${total} records.`, `ব্যাকআপ ডাউনলোড হয়েছে — ${total}টি রেকর্ড।`));
+    } catch (e) { setBackupMsg(`${tr(lang, "Backup failed:", "ব্যাকআপ ব্যর্থ:")} ${(e as Error).message}`); }
+    setBackupBusy(false);
+  };
+  const readRestoreFile = async (file: File | undefined) => {
+    setBackupMsg(""); setRestoreFile(null);
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text()) as { app?: string; collections?: Record<string, Array<{ id: string; data: Record<string, unknown> }>> };
+      if (!parsed.collections || typeof parsed.collections !== "object") { setBackupMsg(tr(lang, "That file is not a Café Reza backup.", "এই ফাইলটি ক্যাফে রেজার ব্যাকআপ নয়।")); return; }
+      setRestoreFile({ name: file.name, collections: parsed.collections });
+    } catch { setBackupMsg(tr(lang, "Could not read that file — it is not valid JSON.", "ফাইলটি পড়া যায়নি — এটি সঠিক JSON নয়।")); }
+  };
+  const restoreBackup = async () => {
+    if (!firestore || !restoreFile) return;
+    const restorable = ["products", "categories", "coupons", "settings", "tables", "suppliers", "expenses", "inventory"];
+    const counts = restorable.map((n) => `${n}: ${(restoreFile.collections[n] ?? []).length}`).join(", ");
+    if (!window.confirm(tr(lang, `Restore this backup? It OVERWRITES the current ${counts}. Orders, reservations, users, messages, reviews and audit logs are NOT restored — they stay as they are. This cannot be undone.`, `এই ব্যাকআপটি ফেরত বসাবেন? এটি বর্তমান ডেটা ওভাররাইট করবে — ${counts}। অর্ডার, রিজার্ভেশন, ইউজার, মেসেজ, রিভিউ ও অডিট লগ ফেরত বসানো হবে না — সেগুলো যেমন আছে তেমনই থাকবে। এটি আর ফেরানো যাবে না।`))) return;
+    setBackupBusy(true); setBackupMsg("");
+    try {
+      let written = 0;
+      let batch = writeBatch(firestore);
+      let inBatch = 0;
+      const flush = async () => { if (inBatch === 0) return; await batch.commit(); batch = writeBatch(firestore); inBatch = 0; };
+      for (const name of restorable) {
+        for (const item of restoreFile.collections[name] ?? []) {
+          if (!item.id || typeof item.data !== "object" || item.data === null) continue;
+          batch.set(doc(firestore, name, item.id), fromPlain(item.data), { merge: false });
+          written++; inBatch++;
+          if (inBatch >= 400) await flush();
+        }
+      }
+      await flush();
+      audit(userDoc, "backup.restore", `${restoreFile.name} — ${written} docs`);
+      setRestoreFile(null);
+      setBackupMsg(tr(lang, `Restore done — ${written} records written.`, `ফেরত বসানো শেষ — ${written}টি রেকর্ড লেখা হয়েছে।`));
+    } catch (e) { setBackupMsg(`${tr(lang, "Restore failed:", "ফেরত বসানো ব্যর্থ:")} ${(e as Error).message}`); }
+    setBackupBusy(false);
+  };
   return (
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Firebase & Launch", "Firebase ও লঞ্চ")}</h3>
@@ -996,6 +1111,26 @@ function FirebaseTab({ userDoc, lang, onSeed, seedBusy, seedMsg }: { userDoc: Us
         <p className="small muted">{tr(lang, "Writes the 26 products and 9 categories (owner's printed menu prices) only where Firestore is empty. Never overwrites an admin-edited price or stock.", "২৬টি প্রোডাক্ট ও ৯টি ক্যাটাগরি (মালিকের ছাপা মেনুর দাম) শুধু খালি জায়গায় লেখে। অ্যাডমিনের বদলানো দাম বা স্টক কখনো ওভাররাইট করে না।")}</p>
         <button className="btn-gold" disabled={seedBusy} onClick={onSeed}>{seedBusy ? tr(lang, "Seeding…", "বসানো হচ্ছে…") : tr(lang, "Seed catalog", "ক্যাটালগ বসান")}</button>
         {seedMsg && <p className="small" role="status">{seedMsg}</p>}
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Data backup", "ডেটা ব্যাকআপ")}</b>
+        <p className="small muted">{tr(lang, "Export downloads every collection as it is right now (products, categories, orders, coupons, users, settings, reservations, tables, suppliers, expenses, reviews, inventory, audit log, messages) as one JSON file. Keep it somewhere safe.", "এক্সপোর্ট করলে সব কালেকশন এখন যেমন আছে তেমনই (প্রোডাক্ট, ক্যাটাগরি, অর্ডার, কুপন, ইউজার, সেটিংস, রিজার্ভেশন, টেবিল, সরবরাহকারী, খরচ, রিভিউ, ইনভেন্টরি, অডিট লগ, মেসেজ) একটি JSON ফাইলে ডাউনলোড হবে। নিরাপদ জায়গায় রাখুন।")}</p>
+        <div className="row">
+          <button className="btn-gold" disabled={backupBusy} onClick={() => void exportBackup()}>{backupBusy ? tr(lang, "Working…", "কাজ হচ্ছে…") : tr(lang, "Export backup (JSON)", "ব্যাকআপ এক্সপোর্ট (JSON)")}</button>
+        </div>
+        <p className="small muted" style={{ marginTop: 10 }}>{tr(lang, "Orders CSV lives in Analytics → “Download orders CSV (this period)”.", "অর্ডারের CSV আছে অ্যানালাইসিস → “অর্ডারের CSV ডাউনলোড (এই সময়ের)”-এ।")}</p>
+        <b style={{ display: "block", marginTop: 12 }}>{tr(lang, "Import / Restore", "ইমপোর্ট / ফেরত বসান")}</b>
+        <p className="small muted">{tr(lang, "Pick a backup file made by Export above. It OVERWRITES the current catalog, coupons, settings, tables, suppliers, expenses and inventory with the file. Orders, reservations, users, messages, reviews and audit logs are NOT restored — they stay as they are.", "উপরে এক্সপোর্ট করা ব্যাকআপ ফাইল বেছে নিন। এটি বর্তমান ক্যাটালগ, কুপন, সেটিংস, টেবিল, সরবরাহকারী, খরচ ও ইনভেন্টরি ফাইলের ডেটা দিয়ে ওভাররাইট করবে। অর্ডার, রিজার্ভেশন, ইউজার, মেসেজ, রিভিউ ও অডিট লগ ফেরত বসানো হবে না — সেগুলো যেমন আছে তেমনই থাকবে।")}</p>
+        <input aria-label={tr(lang, "Choose a backup file", "ব্যাকআপ ফাইল বেছে নিন")} type="file" accept=".json,application/json" onChange={(e) => void readRestoreFile(e.target.files?.[0])} />
+        {restoreFile && (
+          <div className="card" style={{ padding: 12, marginTop: 10, border: "2px solid var(--bad)" }}>
+            <b>{restoreFile.name}</b>
+            <p className="small" style={{ marginTop: 6 }}>{Object.entries(restoreFile.collections).map(([n, arr]) => `${n}: ${arr.length}`).join(" • ")}</p>
+            <p className="small" style={{ color: "var(--bad)", fontWeight: 600 }}>{tr(lang, "Warning: restoring overwrites the current data listed above. This cannot be undone — export a fresh backup first if you are unsure.", "সতর্কতা: ফেরত বসালে উপরের বর্তমান ডেটা ওভাররাইট হবে। এটি আর ফেরানো যাবে না — নিশ্চিত না হলে আগে নতুন একটি ব্যাকআপ এক্সপোর্ট করে নিন।")}</p>
+            <button className="btn-danger" disabled={backupBusy} onClick={() => void restoreBackup()}>{backupBusy ? tr(lang, "Restoring…", "ফেরত বসানো হচ্ছে…") : tr(lang, "Restore this backup", "এই ব্যাকআপটি ফেরত বসান")}</button>
+          </div>
+        )}
+        {backupMsg && <p className="small" role="status" style={{ marginTop: 8 }}>{backupMsg}</p>}
       </div>
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Launch order — admin first, then customers", "লঞ্চের ক্রম — আগে অ্যাডমিন, তারপর কাস্টমার")}</b>
@@ -1215,9 +1350,12 @@ function AnalyticsTab({ orders, products, categories, lang }: { orders: Order[];
 function FinanceTab({ userDoc, orders, lang }: { userDoc: UserDoc; orders: Order[]; lang: Lang }) {
   const firestore = getDb();
   const { data: expenses } = useLive<Expense>(() => (firestore ? query(collection(firestore, "expenses"), orderBy("date", "desc"), limit(200)) : null), expenseFromDoc);
+  const { data: suppliers } = useLive<Supplier>(() => (firestore ? query(collection(firestore, "suppliers"), orderBy("name")) : null), supplierFromDoc);
   const [period, setPeriod] = useState<Period>("30d");
-  const [f, setF] = useState({ date: todayKey(), category: "কাঁচামাল", description: "", amount: 0 });
+  const [f, setF] = useState({ date: todayKey(), category: "কাঁচামাল", description: "", amount: 0, supplier: "" });
+  const [sup, setSup] = useState({ name: "", phone: "", item: "", notes: "" });
   const [msg, setMsg] = useState("");
+  const [supMsg, setSupMsg] = useState("");
   const expInPeriod = expenses.filter((e) => {
     if (period === "all") return true;
     if (period === "today") return e.date === todayKey();
@@ -1240,11 +1378,26 @@ function FinanceTab({ userDoc, orders, lang }: { userDoc: UserDoc; orders: Order
   const unpaid = live.reduce((a, o) => a + Math.max(0, o.total - o.paidAmount), 0);
   const addExpense = async () => {
     if (!firestore || f.amount <= 0 || !f.description.trim()) { setMsg(tr(lang, "Enter a description and an amount above 0.", "বিবরণ ও ০-এর বেশি টাকা লিখুন।")); return; }
-    await addDoc(collection(firestore, "expenses"), { category: f.category, description: f.description.trim(), amount: f.amount, date: f.date, createdAt: serverTimestamp() });
-    audit(userDoc, "expense.add", `${f.category} — ${f.description.trim()} ৳${f.amount}`);
-    setF({ date: todayKey(), category: "কাঁচামাল", description: "", amount: 0 });
+    await addDoc(collection(firestore, "expenses"), { category: f.category, description: f.description.trim(), amount: f.amount, date: f.date, supplier: f.supplier, createdAt: serverTimestamp() });
+    audit(userDoc, "expense.add", `${f.category} — ${f.description.trim()} ৳${f.amount}${f.supplier ? ` (${f.supplier})` : ""}`);
+    setF({ date: todayKey(), category: "কাঁচামাল", description: "", amount: 0, supplier: "" });
     setMsg(tr(lang, "Expense saved.", "খরচ সংরক্ষণ হয়েছে।"));
   };
+  const addSupplier = async () => {
+    if (!firestore || !sup.name.trim()) { setSupMsg(tr(lang, "Enter the supplier's name.", "সরবরাহকারীর নাম লিখুন।")); return; }
+    await addDoc(collection(firestore, "suppliers"), { name: sup.name.trim(), phone: sup.phone.trim(), item: sup.item.trim(), notes: sup.notes.trim() });
+    audit(userDoc, "supplier.add", sup.name.trim());
+    setSup({ name: "", phone: "", item: "", notes: "" });
+    setSupMsg(tr(lang, "Supplier saved.", "সরবরাহকারী সংরক্ষণ হয়েছে।"));
+  };
+  // Supplier totals are all-time (not the selected period), so the
+  // owner sees the full spend per supplier at a glance. Expenses with
+  // no supplier are grouped under "No supplier".
+  const supplierTotals = (() => {
+    const m = new Map<string, number>();
+    expenses.forEach((e) => m.set(e.supplier || "", (m.get(e.supplier || "") ?? 0) + e.amount));
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  })();
   return (
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Finance", "আয়-ব্যয়")}</h3>
@@ -1270,14 +1423,37 @@ function FinanceTab({ userDoc, orders, lang }: { userDoc: UserDoc; orders: Order
           <label>{tr(lang, "Category", "ধরন")}<select aria-label="Expense category" value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>{["কাঁচামাল", "ভাড়া", "বেতন", "বিদ্যুৎ ও গ্যাস", "পরিবহন", "অন্যান্য"].map((c) => <option key={c}>{c}</option>)}</select></label>
         </div>
         <label>{tr(lang, "Description", "বিবরণ")}<input aria-label="Expense description" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></label>
-        <label>{tr(lang, "Amount (৳)", "টাকা (৳)")}<input aria-label="Expense amount" type="number" value={f.amount || ""} onChange={(e) => setF({ ...f, amount: Number(e.target.value) })} /></label>
+        <div className="row">
+          <label>{tr(lang, "Amount (৳)", "টাকা (৳)")}<input aria-label="Expense amount" type="number" value={f.amount || ""} onChange={(e) => setF({ ...f, amount: Number(e.target.value) })} /></label>
+          <label>{tr(lang, "Supplier (optional)", "সরবরাহকারী (ঐচ্ছিক)")}<select aria-label="Expense supplier" value={f.supplier} onChange={(e) => setF({ ...f, supplier: e.target.value })}><option value="">{tr(lang, "No supplier", "কোনো সরবরাহকারী নয়")}</option>{suppliers.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}</select></label>
+        </div>
         <button className="btn-gold" onClick={() => void addExpense()}>{tr(lang, "Save expense", "খরচ সংরক্ষণ করুন")}</button>
       </div>
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Expenses (recent)", "খরচ (সাম্প্রতিক)")}</b>
         {expInPeriod.length === 0 ? <p className="small muted">{tr(lang, "No expenses in this period.", "এই সময়ে কোনো খরচ নেই।")}</p> : expInPeriod.slice(0, 50).map((e) => (
-          <p key={e.id} className="small">{e.date} • {e.category} • {e.description} — {tk(e.amount)} <button className="btn-danger" style={{ padding: "2px 8px" }} onClick={() => { if (!firestore) return; void deleteDoc(doc(firestore, "expenses", e.id)); audit(userDoc, "expense.delete", `${e.category} — ${e.description} ৳${e.amount}`); }}>{tr(lang, "Delete", "মুছুন")}</button></p>
+          <p key={e.id} className="small">{e.date} • {e.category} • {e.description}{e.supplier ? ` • ${e.supplier}` : ""} — {tk(e.amount)} <button className="btn-danger" style={{ padding: "2px 8px" }} onClick={() => { if (!firestore) return; void deleteDoc(doc(firestore, "expenses", e.id)); audit(userDoc, "expense.delete", `${e.category} — ${e.description} ৳${e.amount}`); }}>{tr(lang, "Delete", "মুছুন")}</button></p>
         ))}
+      </div>
+      <div className="card" style={{ padding: 14, marginTop: 12 }}>
+        <b>{tr(lang, "Suppliers", "সরবরাহকারী")}</b>
+        {supMsg && <p className="small" role="status">{supMsg}</p>}
+        <div className="row">
+          <label>{tr(lang, "Name", "নাম")}<input aria-label="Supplier name" value={sup.name} onChange={(e) => setSup({ ...sup, name: e.target.value })} /></label>
+          <label>{tr(lang, "Phone", "ফোন")}<input aria-label="Supplier phone" value={sup.phone} onChange={(e) => setSup({ ...sup, phone: e.target.value })} /></label>
+        </div>
+        <label>{tr(lang, "What they supply", "যা সরবরাহ করে")}<input aria-label="Supplier item" value={sup.item} onChange={(e) => setSup({ ...sup, item: e.target.value })} placeholder={tr(lang, "e.g. milk, tea leaves, cups", "যেমন: দুধ, চা পাতা, কাপ")} /></label>
+        <label>{tr(lang, "Notes", "মন্তব্য")}<input aria-label="Supplier notes" value={sup.notes} onChange={(e) => setSup({ ...sup, notes: e.target.value })} /></label>
+        <button className="btn-gold" onClick={() => void addSupplier()}>{tr(lang, "Save supplier", "সরবরাহকারী সংরক্ষণ করুন")}</button>
+        {suppliers.length === 0
+          ? <p className="small muted" style={{ marginTop: 8 }}>{tr(lang, "No suppliers yet — add one above, then link expenses to them.", "এখনো কোনো সরবরাহকারী নেই — উপরে যোগ করুন, তারপর খরচ তাদের সাথে যুক্ত করুন।")}</p>
+          : suppliers.map((s) => (
+            <p key={s.id} className="small" style={{ marginTop: 8 }}>{s.name}{s.phone ? ` • ${s.phone}` : ""}{s.item ? ` • ${s.item}` : ""}{s.notes ? ` • ${s.notes}` : ""} <button className="btn-danger" style={{ padding: "2px 8px" }} onClick={() => { if (!firestore) return; void deleteDoc(doc(firestore, "suppliers", s.id)); audit(userDoc, "supplier.delete", s.name); }}>{tr(lang, "Delete", "মুছুন")}</button></p>
+          ))}
+        <b style={{ display: "block", marginTop: 12 }}>{tr(lang, "Spent per supplier (all time)", "সরবরাহকারী অনুযায়ী খরচ (সব সময়ের মোট)")}</b>
+        {supplierTotals.length === 0
+          ? <p className="small muted">{tr(lang, "No expenses yet.", "এখনো কোনো খরচ নেই।")}</p>
+          : supplierTotals.map(([name, total]) => <p key={name || "none"} className="small">{name || tr(lang, "No supplier", "কোনো সরবরাহকারী নয়")} — {tk(total)}</p>)}
       </div>
     </div>
   );
@@ -1457,8 +1633,13 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
           <button className="chip" aria-label="Switch language" onClick={onToggleLang}>{lang === "bn" ? "EN" : "বাংলা"}</button>
           <button className="chip" aria-label="Toggle theme" onClick={onToggleTheme}>{theme === "dark" ? "☀" : "☾"}</button>
         </div>
-        <p className="serif" style={{ fontSize: 18, margin: 0 }}>{tr(lang, "Admin panel", "অ্যাডমিন প্যানেল")}</p>
-        <p className="small muted" style={{ margin: 0 }}>{userDoc.name} • {owner ? tr(lang, "Super Admin (Owner)", "সুপার অ্যাডমিন (মালিক)") : userDoc.role}</p>
+        <div className="row" style={{ alignItems: "center" }}>
+          <span className="logo-tile" style={{ width: 44, height: 44 }}><img src="/img/logo.jpg" alt="Café Reza logo" /></span>
+          <span>
+            <p className="serif" style={{ fontSize: 18, margin: 0 }}>{tr(lang, "Admin panel", "অ্যাডমিন প্যানেল")}</p>
+            <p className="small muted" style={{ margin: 0 }}>{userDoc.name} • {owner ? tr(lang, "Super Admin (Owner)", "সুপার অ্যাডমিন (মালিক)") : userDoc.role}</p>
+          </span>
+        </div>
         {showAlerts && (
           <div style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 16, paddingTop: 72 }} onClick={() => setShowAlerts(false)}>
             <div className="card" role="dialog" aria-label={tr(lang, "Alerts", "সতর্কতা")} style={{ width: "min(480px, 100%)", padding: 16, maxHeight: "80vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
