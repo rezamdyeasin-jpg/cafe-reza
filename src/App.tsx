@@ -1259,21 +1259,39 @@ async function compressChatImage(file: File): Promise<string> {
     r.onerror = () => reject(new Error("Could not read the image."));
     r.readAsDataURL(file);
   });
-  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const im = new Image();
-    im.onload = () => resolve(im);
-    im.onerror = () => reject(new Error("Could not load the image."));
-    im.src = dataUrl;
-  });
+  // Small images: keep the original exactly (PNG stays PNG) — no canvas
+  // at all, so nothing in the conversion can turn it black. Firestore
+  // documents hold ~1 MB, so stay well under that.
+  if (file.size < 700 * 1024) return dataUrl;
+  // Large images: downscale on a white canvas. A PNG screenshot can carry
+  // transparency, and JPEG has none — without the white fill the
+  // transparent parts turn BLACK in the exported image, so the whole
+  // screenshot looks black in the chat. White keeps it readable.
+  // createImageBitmap decodes more reliably on mobile than new Image().
+  const bitmap = await createImageBitmap(file);
   const max = 1024;
-  const scale = Math.min(1, max / Math.max(img.width, img.height));
-  const w = Math.max(1, Math.round(img.width * scale));
-  const h = Math.max(1, Math.round(img.height * scale));
+  const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
   const canvas = document.createElement("canvas");
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Could not process the image.");
-  ctx.drawImage(img, 0, 0, w, h);
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  // Safety net: if the canvas still came out almost entirely black (a bad
+  // decode), send the original instead of a black box — the chat will show
+  // the real screenshot even if it is larger.
+  const px = ctx.getImageData(0, 0, w, h).data;
+  let dark = 0, sampled = 0;
+  for (let i = 0; i < px.length; i += 4 * 97) {
+    sampled++;
+    const r = px[i] ?? 255, g = px[i + 1] ?? 255, b = px[i + 2] ?? 255;
+    if (r < 12 && g < 12 && b < 12) dark++;
+  }
+  if (sampled > 0 && dark / sampled > 0.98) return dataUrl;
   return canvas.toDataURL("image/jpeg", 0.7);
 }
 
