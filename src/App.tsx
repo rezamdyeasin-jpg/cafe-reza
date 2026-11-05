@@ -527,6 +527,12 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   const [couponInfo, setCouponInfo] = useState<{ status: "idle" | "ok" | "error"; discount: number; note: string; checkedSubtotal: number }>({ status: "idle", discount: 0, note: "", checkedSubtotal: -1 });
   const [ref, setRef] = useState("");
   const [err, setErr] = useState("");
+  // Field errors: shown right under the field they belong to (phone error
+  // under the phone box, address error under the address box), so the
+  // customer sees at once what to fix instead of hunting for one message
+  // at the bottom of the form.
+  const [phoneErr, setPhoneErr] = useState("");
+  const [addressErr, setAddressErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [doneNo, setDoneNo] = useState("");
   const [doneTotal, setDoneTotal] = useState(0);
@@ -549,10 +555,11 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
         const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18`);
         if (res.ok) {
           const d = (await res.json()) as { display_name?: string };
-          if (d.display_name) { setAddress(`${d.display_name} — Map: ${mapUrl}`); setLocMsg(tr(lang, "Location added.", "লোকেশন যোগ হয়েছে।")); setLocBusy(false); return; }
+          if (d.display_name) { setAddress(`${d.display_name} — Map: ${mapUrl}`); setAddressErr(""); setLocMsg(tr(lang, "Location added.", "লোকেশন যোগ হয়েছে।")); setLocBusy(false); return; }
         }
       } catch { /* fall through to the map link */ }
       setAddress(mapUrl);
+      setAddressErr("");
       setLocMsg(tr(lang, "Location added as a map link.", "লোকেশন ম্যাপ লিংক হিসেবে যোগ হয়েছে।"));
       setLocBusy(false);
     }, (e) => {
@@ -562,7 +569,7 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
   };
   useEffect(() => {
     if (open) {
-      setStep("cart"); setErr(""); window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      setStep("cart"); setErr(""); setPhoneErr(""); setAddressErr(""); window.scrollTo({ top: 0, left: 0, behavior: "auto" });
       // Table QR handoff: a scanned table QR opens the menu with
       // ?table=T1 in the URL — prefill dine-in with that table, but
       // only when the customer has not already picked a table.
@@ -660,11 +667,18 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
       setErr(couponInfo.note || tr(lang, "The coupon code is not valid — remove it or check it again before ordering.", "কুপন কোডটি ঠিক নয় — অর্ডারের আগে সেটি সরান বা আবার যাচাই করুন।"));
       return;
     }
+    // Field errors sit right under the field they belong to — a phone
+    // error under the phone box, an address error under the address box.
+    setPhoneErr(""); setAddressErr("");
     // The checkout phone must be a real Bangladeshi mobile number —
     // a wrong or random number must not place an order.
     const bdPhone = normalizeBdPhone(phone);
     if (!bdPhone) {
-      setErr(tr(lang, "Enter a valid Bangladeshi mobile number (11 digits, starting with 01).", "সঠিক বাংলাদেশি মোবাইল নম্বর দিন (১১ অঙ্ক, 01 দিয়ে শুরু)।"));
+      setPhoneErr(tr(lang, "Enter a valid Bangladeshi mobile number (11 digits, starting with 01).", "সঠিক বাংলাদেশি মোবাইল নম্বর দিন (১১ অঙ্ক, 01 দিয়ে শুরু)।"));
+      return;
+    }
+    if (orderType === "delivery" && !address.trim()) {
+      setAddressErr(tr(lang, "Enter your delivery address.", "আপনার ডেলিভারির ঠিকানা লিখুন।"));
       return;
     }
     setErr(""); setBusy(true);
@@ -725,7 +739,8 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
             <form id="fb-checkout-form" onSubmit={(e) => void submit(e)} style={{ marginTop: 10 }}>
               {!fbUser && <p className="small" style={{ color: "var(--bad)" }}>{tr(lang, "Sign in to place an order — use Google, Facebook or phone from My Account.", "অর্ডার করতে সাইন-ইন করুন — My Account থেকে Google, Facebook বা ফোন ব্যবহার করুন।")}</p>}
               <label>{tr(lang, "Full name", "পুরো নাম")}<input aria-label="Full name" required value={name} onChange={(e) => setName(e.target.value)} /></label>
-              <label>{tr(lang, "Phone", "ফোন")}<input aria-label="Phone number" required value={phone} onChange={(e) => setPhone(e.target.value)} /></label>
+              <label>{tr(lang, "Phone", "ফোন")}<input aria-label="Phone number" required value={phone} onChange={(e) => { setPhone(e.target.value); setPhoneErr(""); }} /></label>
+              {phoneErr && <p className="small" role="alert" style={{ color: "var(--bad)", marginTop: 2 }}>{phoneErr}</p>}
               <label>{tr(lang, "Order type", "অর্ডারের ধরন")}<select aria-label="Order type" value={orderType} onChange={(e) => setOrderType(e.target.value)}><option value="delivery">{tr(lang, "Home delivery", "হোম ডেলিভারি")}</option><option value="takeaway">{tr(lang, "Takeaway", "টেকঅ্যাওয়ে")}</option><option value="dine-in">{tr(lang, "Dine-in", "ডাইন-ইন")}</option></select></label>
               {orderType === "delivery" && (
                 <>
@@ -735,7 +750,8 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
                       {(userDoc?.savedAddresses ?? []).map((a, i) => <option key={`${a.address}-${i}`} value={a.address}>{a.label ? `${a.label} — ${a.address}` : a.address}</option>)}
                     </select></label>
                   )}
-                  <label>{tr(lang, "Delivery address", "ডেলিভারির ঠিকানা")}<input aria-label="Delivery address" required value={address} onChange={(e) => setAddress(e.target.value)} /></label>
+                  <label>{tr(lang, "Delivery address", "ডেলিভারির ঠিকানা")}<input aria-label="Delivery address" required value={address} onChange={(e) => { setAddress(e.target.value); setAddressErr(""); }} /></label>
+                  {addressErr && <p className="small" role="alert" style={{ color: "var(--bad)", marginTop: 2 }}>{addressErr}</p>}
                   <div className="row" style={{ marginTop: 6 }}>
                     <button type="button" className="btn-ghost" disabled={locBusy} onClick={useMyLocation}>{locBusy ? tr(lang, "Getting your location…", "আপনার লোকেশন নেওয়া হচ্ছে…") : `📍 ${tr(lang, "Use my current location", "আমার বর্তমান লোকেশন ব্যবহার করুন")}`}</button>
                   </div>
@@ -843,7 +859,10 @@ function orderEta(o: Order, settings: Settings): Date | null {
 // confirmation, cancels through the transaction (stock comes back),
 // and reports the result in place.
 function CancelOrderButton({ order, uid, settings, lang }: { order: Order; uid: string; settings: Settings; lang: Lang }) {
-  const now = useNow(15000);
+  // Ticks every second, so the "you can cancel for 1:34" countdown runs
+  // live on the screen — the customer watches it fall second by second
+  // instead of seeing a frozen number that only moves on reload.
+  const now = useNow(1000);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const remaining = cancelRemainingMs(order, settings, now);
