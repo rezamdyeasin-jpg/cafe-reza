@@ -9,9 +9,13 @@
 // The Gemini call is a plain fetch — no new dependency. The model is
 // gemini-3.5-flash (verified working with the owner's key on 5 Nov 2026;
 // gemini-2.5-flash returns 404 "no longer available to new users" and
-// gemini-flash-latest returns 503 high-demand). If the key is missing
-// or the call fails, the caller shows a polite note and the chat
-// still works — the admin always gets the customer's message.
+// gemini-flash-latest returns 503 high-demand). The call is retried on
+// transient failures (429 rate limit, 503 overload) and falls back to
+// gemini-3-flash-preview (also verified working) before giving up, so a
+// single hiccup no longer leaves the customer with "AI এখন উত্তর দিতে
+// পারছে না". If the key is missing or every attempt fails, the caller
+// shows a polite note and the chat still works — the admin always gets
+// the customer's message.
 import type { Order, Product, Settings } from "./db";
 
 // --- Weather (Comilla) for food suggestions: Open-Meteo is free and
@@ -91,30 +95,55 @@ ${orderLines || "(no orders yet)"}
 }
 
 export async function askAi(apiKey: string, systemPrompt: string, history: Array<{ role: "user" | "model"; text: string }>, question: string, imageDataUrl?: string): Promise<{ ok: boolean; text?: string; error?: string }> {
-  try {
-    // The question can carry a screenshot (data URL). If present, send
-    // it to Gemini as an image part so the AI can see it and solve the
-    // problem in it. The image is already compressed by the caller.
-    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [{ text: question }];
-    if (imageDataUrl) {
-      const m = imageDataUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-      if (m && m[1] && m[2]) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
-    }
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: systemPrompt }] },
-        contents: [...history.map((h) => ({ role: h.role, parts: [{ text: h.text }] })), { role: "user", parts }],
-        generationConfig: { maxOutputTokens: 500, temperature: 0.3 },
-      }),
-    });
-    if (!res.ok) return { ok: false, error: `Gemini ${res.status}` };
-    const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("").trim() ?? "";
-    if (!text) return { ok: false, error: "Empty reply" };
-    return { ok: true, text };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  // The question can carry a screenshot (data URL). If present, send
+  // it to Gemini as an image part so the AI can see it and solve the
+  // problem in it. The image is already compressed by the caller.
+  const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [{ text: question }];
+  if (imageDataUrl) {
+    const m = imageDataUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+    if (m && m[1] && m[2]) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
   }
+  const body = JSON.stringify({
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents: [...history.map((h) => ({ role: h.role, parts: [{ text: h.text }] })), { role: "user", parts }],
+    generationConfig: { maxOutputTokens: 500, temperature: 0.3 },
+  });
+  // Try the main model, retrying once on a transient failure (429 rate
+  // limit, 503 overload), then fall back to the spare model once. Only
+  // after every attempt fails does the caller see the polite "AI এখন
+  // উত্তর দিতে পারছে না" note. A 4xx other than 429 (bad key, unknown
+  // model) is not retried — retrying it would never help.
+  const models = ["gemini-3.5-flash", "gemini-3-flash-preview"];
+  let lastError = "Gemini failed";
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+        if (!res.ok) {
+          lastError = `Gemini ${res.status}`;
+          if ((res.status === 429 || res.status === 503) && attempt === 0) {
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+          break;
+        }
+        const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+        const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("").trim() ?? "";
+        if (!text) { lastError = "Empty reply"; break; }
+        return { ok: true, text };
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+        break;
+      }
+    }
+  }
+  return { ok: false, error: lastError };
 }

@@ -1343,11 +1343,17 @@ function ChatBox({ fbUser, userDoc, products, settings, lang, onAddToCart }: { f
   const [imgBusy, setImgBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const { data: messages } = useLive<{ id: string; author: string; authorName: string; body: string; imageData: string; createdAt: string }>(
-    () => (firestore && fbUser ? query(collection(firestore, "messages"), where("userId", "==", fbUser.uid), orderBy("createdAt", "asc"), limit(100)) : null),
+  // Newest 100 first, then flipped for display — the old query took
+  // the OLDEST 100 (orderBy asc + limit 100), so once a thread passed
+  // 100 messages the newest replies never appeared in this chat at
+  // all, while the admin panel (newest first) showed them fine. Now
+  // both sides see the same latest messages.
+  const { data: messagesDesc } = useLive<{ id: string; author: string; authorName: string; body: string; imageData: string; createdAt: string }>(
+    () => (firestore && fbUser ? query(collection(firestore, "messages"), where("userId", "==", fbUser.uid), orderBy("createdAt", "desc"), limit(100)) : null),
     (id, d) => ({ id, author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), body: String(d.body ?? ""), imageData: String(d.imageData ?? ""), createdAt: tsToIso(d.createdAt) }),
     [fbUser?.uid],
   );
+  const messages = useMemo(() => [...messagesDesc].reverse(), [messagesDesc]);
   // The signed-in customer's own recent orders, so the AI can answer
   // whether an order was confirmed, what stage it is at, or if it was
   // cancelled — only this customer's orders, never anyone else's.
