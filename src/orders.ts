@@ -11,7 +11,7 @@
 // everything first (products, coupon, user) and only then writes
 // (stock, coupon count, order, loyalty). That ordering is the whole
 // fix for website orders failing at checkout.
-import { collection, doc, getDoc, getDocs, limit, query, runTransaction, serverTimestamp, where, type DocumentReference } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, limit, orderBy, query, runTransaction, serverTimestamp, where, type DocumentReference } from "firebase/firestore";
 import { getDb } from "./firebase";
 import type { Order, OrderItem, Product, Settings } from "./db";
 
@@ -115,6 +115,22 @@ export async function cancelOrderTx(args: {
   }
 }
 
+// --- Bangladeshi mobile number: a website order's phone must be a
+// real Bangladeshi mobile number, or the order must not go through.
+// Accepted forms: 01XXXXXXXXX (11 digits), +8801XXXXXXXXX and
+// 8801XXXXXXXXX — all normalised to 01XXXXXXXXX for storage.
+// Operator codes are 3–9 (013, 014, 015, 016, 017, 018, 019).
+// A 10-digit number, a random number or any other form is rejected
+// (returns null). POS counter sales have no phone, so they skip this.
+export function normalizeBdPhone(raw: string): string | null {
+  const d = raw.trim().replace(/[\s\-()]/g, "");
+  const intl = d.match(/^\+?880(1[3-9]\d{8})$/);
+  if (intl) return `0${intl[1]}`;
+  const local = d.match(/^0(1[3-9]\d{8})$/);
+  if (local) return `0${local[1]}`;
+  return null;
+}
+
 export async function placeOrderTx(args: {
   uid: string;
   customerName: string;
@@ -136,7 +152,16 @@ export async function placeOrderTx(args: {
   const firestore = getDb();
   if (!firestore) return { ok: false, error: "Firebase is not configured." };
   if (args.lines.length === 0) return { ok: false, error: "The cart is empty." };
+  // Website orders need a real Bangladeshi mobile number — a wrong
+  // or random number must not place an order. The number is stored
+  // normalised (01XXXXXXXXX). POS counter sales have no phone.
   const isPos = args.source === "pos";
+  let phone = args.phone;
+  if (!isPos) {
+    const ok = normalizeBdPhone(args.phone);
+    if (!ok) return { ok: false, error: "Enter a valid Bangladeshi mobile number (11 digits, starting with 01)." };
+    phone = ok;
+  }
   const code = args.couponCode.trim().toUpperCase();
   try {
     // First-order-only coupons: check the customer's real order
@@ -261,7 +286,7 @@ export async function placeOrderTx(args: {
       // placement moment from this client (within a second of it) so
       // the just-placed order can show its receipt at once.
       const receipt: Order = {
-        id: orderRef.id, orderNo: no, userId: args.uid, customerName: args.customerName, phone: args.phone, address: args.address,
+        id: orderRef.id, orderNo: no, userId: args.uid, customerName: args.customerName, phone, address: args.address,
         orderType: args.orderType, source: args.source, status: isPos ? "Completed" : "Pending",
         paymentMethod: args.paymentMethod, paymentStatus: isPos ? "Paid" : "Unpaid", paymentRef: args.paymentRef,
         subtotal, discount, vat, deliveryFee, total,

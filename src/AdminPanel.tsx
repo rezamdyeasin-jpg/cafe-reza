@@ -130,10 +130,12 @@ function waitingText(createdAt: string, now: number): string {
   return h > 0 ? `${p(h)}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
 }
 
-function OrdersTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; products: Product[]; settings: Settings; lang: Lang }) {
+function OrdersTab({ userDoc, products, settings, lang, filter, onFilterChange }: { userDoc: UserDoc; products: Product[]; settings: Settings; lang: Lang; filter: "all" | "pending" | "today"; onFilterChange: (f: "all" | "pending" | "today") => void }) {
   const firestore = getDb();
   const now = useNow(1000);
   const { data: orders } = useLive<Order>(() => (firestore ? query(collection(firestore, "orders"), orderBy("createdAt", "desc"), limit(60)) : null), orderFromDoc);
+  // Dashboard cards jump here with a filter — show only those orders.
+  const shownOrders = filter === "pending" ? orders.filter((o) => o.status === "Pending") : filter === "today" ? orders.filter((o) => dayKey(o.createdAt) === todayKey() && LIVE_ORDER(o)) : orders;
   // Trust stats come from a wider recent window (200 orders) than the
   // 60 shown here, so a number's history is judged on more than the
   // few orders on screen. The lookup below reads the full history.
@@ -213,6 +215,12 @@ function OrdersTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; pr
     <div>
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Live Orders / Kitchen", "লাইভ অর্ডার / কিচেন")}</h3>
       <p className="small"><span style={{ color: "var(--good)" }}>● {tr(lang, "LIVE", "লাইভ")}</span> — {tr(lang, "New orders appear here the moment they arrive.", "নতুন অর্ডার আসার সঙ্গে সঙ্গে এখানে দেখা যাবে।")} {orders.filter((o) => o.status === "Pending").length} {tr(lang, "pending", "টি অপেক্ষমাণ")}</p>
+      <div className="row" style={{ marginTop: 8 }} role="group" aria-label={tr(lang, "Order filter", "অর্ডার ফিল্টার")}>
+        {(["all", "pending", "today"] as const).map((f) => (
+          <button key={f} className={`chip ${filter === f ? "chip-on" : ""}`} onClick={() => onFilterChange(f)}>{f === "all" ? tr(lang, "All orders", "সব অর্ডার") : f === "pending" ? tr(lang, "Pending", "অপেক্ষমাণ") : tr(lang, "Today", "আজকের")}</button>
+        ))}
+        <span className="small muted">{shownOrders.length} {tr(lang, "shown", "টি দেখানো হচ্ছে")}</span>
+      </div>
       {note && <p className="small" role="status">{note}</p>}
       <div className="card" style={{ padding: 12, marginTop: 10 }}>
         <b>{tr(lang, "Phone number lookup", "ফোন নম্বর খুঁজুন")}</b>
@@ -236,8 +244,8 @@ function OrdersTab({ userDoc, products, settings, lang }: { userDoc: UserDoc; pr
         )}
       </div>
       <label>{tr(lang, "Refund reason (for the button below)", "ফেরতের কারণ (নিচের বোতামের জন্য)")}<input aria-label="Refund reason" value={refundReason} onChange={(e) => setRefundReason(e.target.value)} /></label>
-      {orders.length === 0 && <p className="muted small">{tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
-      {orders.map((o) => {
+      {shownOrders.length === 0 && <p className="muted small">{filter === "pending" ? tr(lang, "No pending orders.", "কোনো অপেক্ষমাণ অর্ডার নেই।") : filter === "today" ? tr(lang, "No orders today yet.", "আজকে এখনো কোনো অর্ডার নেই।") : tr(lang, "No orders yet.", "এখনো কোনো অর্ডার নেই।")}</p>}
+      {shownOrders.map((o) => {
         const st = phoneStats.get(normalizePhone(o.phone ?? ""));
         const lvl = st ? trustLevel(st.cancelRate, settings.riskCautionPct ?? 25, settings.riskRiskyPct ?? 50) : null;
         // Kitchen timer: how long this order has waited since it was
@@ -833,7 +841,7 @@ function AuditLogTab({ lang }: { lang: Lang }) {
 function SupportTab({ userDoc, products, lang }: { userDoc: UserDoc; products: Product[]; lang: Lang }) {
   const firestore = getDb();
   const { data: messages } = useLive(() => (firestore ? query(collection(firestore, "messages"), orderBy("createdAt", "desc"), limit(100)) : null),
-    (id, d) => ({ id, userId: String(d.userId ?? ""), author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), guestName: String(d.guestName ?? ""), guestPhone: String(d.guestPhone ?? ""), body: String(d.body ?? ""), orderNo: String(d.orderNo ?? ""), readFlag: !!d.readFlag, createdAt: tsToIso(d.createdAt) }));
+    (id, d) => ({ id, userId: String(d.userId ?? ""), author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), guestName: String(d.guestName ?? ""), guestPhone: String(d.guestPhone ?? ""), body: String(d.body ?? ""), imageData: String(d.imageData ?? ""), orderNo: String(d.orderNo ?? ""), readFlag: !!d.readFlag, createdAt: tsToIso(d.createdAt) }));
   const { data: tickets } = useLive(() => (firestore ? query(collection(firestore, "tickets"), orderBy("createdAt", "desc"), limit(30)) : null),
     (id, d) => ({ id, name: String(d.name ?? ""), phone: String(d.phone ?? ""), category: String(d.category ?? "General"), priority: String(d.priority ?? "Normal"), status: String(d.status ?? "Open"), message: String(d.message ?? ""), reply: String(d.reply ?? "") }));
   const { data: reviews } = useLive(() => (firestore ? query(collection(firestore, "reviews"), orderBy("createdAt", "desc"), limit(30)) : null),
@@ -889,7 +897,8 @@ function SupportTab({ userDoc, products, lang }: { userDoc: UserDoc; products: P
             {active.list.map((m) => (
               <div key={m.id} style={{ alignSelf: m.author === "staff" ? "flex-end" : "flex-start", maxWidth: "85%", background: m.author === "staff" ? "var(--gold)" : "var(--surface)", color: m.author === "staff" ? "#fff" : "inherit", borderRadius: 12, padding: "8px 10px" }}>
                 <span className="small" style={{ fontWeight: 700, opacity: 0.85 }}>{m.author === "ai" ? (<><img src="/img/logo.jpg" alt="" style={{ width: 18, height: 18, borderRadius: "50%", verticalAlign: "-4px", marginRight: 4 }} />{m.authorName}</>) : m.author === "staff" ? `🏪 ${m.authorName}` : m.authorName || tr(lang, "Customer", "কাস্টমার")}</span>
-                <p className="small" style={{ margin: "2px 0 0", whiteSpace: "pre-wrap" }}>{m.body}</p>
+                {m.imageData && <img src={m.imageData} alt="" style={{ display: "block", maxWidth: "100%", borderRadius: 8, marginTop: 6 }} />}
+                {m.body && <p className="small" style={{ margin: "2px 0 0", whiteSpace: "pre-wrap" }}>{m.body}</p>}
                 {m.createdAt && <p className="small muted" style={{ margin: "2px 0 0" }}>{new Date(m.createdAt).toLocaleString("en-GB")}</p>}
               </div>
             ))}
@@ -1461,7 +1470,7 @@ function FinanceTab({ userDoc, orders, lang }: { userDoc: UserDoc; orders: Order
 
 // Owner Control Panel (Super Admin only): the business at a glance,
 // staff & permissions summary, and quick links to the owner-only tabs.
-function OwnerTab({ userDoc, orders, products, lang, onGoTab }: { userDoc: UserDoc; orders: Order[]; products: Product[]; lang: Lang; onGoTab: (t: string) => void }) {
+function OwnerTab({ userDoc, orders, products, lang, onGoTab, onGoOrders }: { userDoc: UserDoc; orders: Order[]; products: Product[]; lang: Lang; onGoTab: (t: string) => void; onGoOrders: (f: "all" | "pending" | "today") => void }) {
   const firestore = getDb();
   const { data: users } = useLive<UserDoc>(() => (firestore ? query(collection(firestore, "users"), orderBy("createdAt", "desc"), limit(100)) : null), userFromDoc);
   const staff = users.filter((u) => u.role !== "customer");
@@ -1480,12 +1489,12 @@ function OwnerTab({ userDoc, orders, products, lang, onGoTab }: { userDoc: UserD
       <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Owner Control Panel", "মালিক প্যানেল")}</h3>
       <p className="small muted">{tr(lang, "Only the Super Admin (owner) sees this. Financial figures and important settings live here and in the owner-only tabs — staff never see them.", "এটি শুধু সুপার অ্যাডমিন (মালিক) দেখতে পারেন। আর্থিক তথ্য ও গুরুত্বপূর্ণ সেটিংস এখানে ও মালিকের ট্যাবে থাকে — স্টাফরা এগুলো দেখতে পান না।")}</p>
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginTop: 10 }}>
-        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(todayRevenue)}</b><p className="small">{tr(lang, "Revenue today", "আজকের আয়")}</p></div>
-        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(monthRevenue)}</b><p className="small">{tr(lang, "Revenue this month", "এই মাসের আয়")}</p></div>
-        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{todayOrders.length}</b><p className="small">{tr(lang, "Orders today", "আজকের অর্ডার")}</p></div>
-        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{pending}</b><p className="small">{tr(lang, "Pending orders", "অপেক্ষমাণ অর্ডার")}</p></div>
-        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{lowStock.length}</b><p className="small">{tr(lang, "Low-stock products", "কম স্টকের প্রোডাক্ট")}</p></div>
-        <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{staff.length}</b><p className="small">{tr(lang, "Staff accounts", "স্টাফ অ্যাকাউন্ট")}</p></div>
+        <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => onGoTab("finance")}><b style={{ fontSize: 20 }}>{tk(todayRevenue)}</b><p className="small">{tr(lang, "Revenue today", "আজকের আয়")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
+        <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => onGoTab("finance")}><b style={{ fontSize: 20 }}>{tk(monthRevenue)}</b><p className="small">{tr(lang, "Revenue this month", "এই মাসের আয়")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
+        <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => onGoOrders("today")}><b style={{ fontSize: 20 }}>{todayOrders.length}</b><p className="small">{tr(lang, "Orders today", "আজকের অর্ডার")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
+        <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => onGoOrders("pending")}><b style={{ fontSize: 20 }}>{pending}</b><p className="small">{tr(lang, "Pending orders", "অপেক্ষমাণ অর্ডার")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to confirm", "কনফার্ম করতে চাপ দিন")}</p></button>
+        <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => onGoTab("products")}><b style={{ fontSize: 20 }}>{lowStock.length}</b><p className="small">{tr(lang, "Low-stock products", "কম স্টকের প্রোডাক্ট")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
+        <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => onGoTab("users")}><b style={{ fontSize: 20 }}>{staff.length}</b><p className="small">{tr(lang, "Staff accounts", "স্টাফ অ্যাকাউন্ট")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
       </div>
       <div className="card" style={{ padding: 14, marginTop: 12 }}>
         <b>{tr(lang, "Best seller (all time)", "সেরা বিক্রি (সব সময়)")}</b>
@@ -1559,6 +1568,11 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
   lang: Lang; onToggleLang: () => void; theme: "dark" | "light"; onToggleTheme: () => void; onBack: () => void; onSeed: () => void; seedBusy: boolean; seedMsg: string; signInCard: React.ReactNode;
 }) {
   const [tab, setTab] = useState("dashboard");
+  // Dashboard stat cards jump to the matching list: which orders the
+  // Live Orders tab shows (all / pending / today). The tab keeps the
+  // filter, with its own All / Pending / Today buttons to change it.
+  const [ordersFilter, setOrdersFilter] = useState<"all" | "pending" | "today">("all");
+  const goOrders = (f: "all" | "pending" | "today") => { setOrdersFilter(f); setTab("orders"); };
   const [showAlerts, setShowAlerts] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   // Choosing any section closes the menu, however it was chosen (menu
@@ -1682,20 +1696,20 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
         <button className="btn-ghost" onClick={onBack}>{tr(lang, "Back to shop", "দোকানে ফিরুন")}</button>
       </nav>
       <div>
-        {activeTab === "owner" && <OwnerTab userDoc={userDoc} orders={orders} products={products} lang={lang} onGoTab={(t) => setTab(t)} />}
+        {activeTab === "owner" && <OwnerTab userDoc={userDoc} orders={orders} products={products} lang={lang} onGoTab={(t) => setTab(t)} onGoOrders={goOrders} />}
         {activeTab === "dashboard" && (
           <div>
             <h3 className="serif" style={{ fontSize: 20 }}>{tr(lang, "Dashboard", "ড্যাশবোর্ড")}</h3>
             <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginTop: 10 }}>
-              <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{orders.length}</b><p className="small">{tr(lang, "Orders (recent 500)", "অর্ডার (সাম্প্রতিক ৫০০)")}</p></div>
-              <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{orders.filter((o) => o.status === "Pending").length}</b><p className="small">{tr(lang, "Pending orders", "অপেক্ষমাণ অর্ডার")}</p></div>
-              <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{todayOrders.length}</b><p className="small">{tr(lang, "Orders today", "আজকের অর্ডার")}</p></div>
+              <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => goOrders("all")}><b style={{ fontSize: 20 }}>{orders.length}</b><p className="small">{tr(lang, "Orders (recent 500)", "অর্ডার (সাম্প্রতিক ৫০০)")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
+              <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => goOrders("pending")}><b style={{ fontSize: 20 }}>{orders.filter((o) => o.status === "Pending").length}</b><p className="small">{tr(lang, "Pending orders", "অপেক্ষমাণ অর্ডার")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to confirm", "কনফার্ম করতে চাপ দিন")}</p></button>
+              <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => goOrders("today")}><b style={{ fontSize: 20 }}>{todayOrders.length}</b><p className="small">{tr(lang, "Orders today", "আজকের অর্ডার")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
             </div>
             {owner && (
               <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginTop: 10 }}>
-                <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(todayRevenue)}</b><p className="small">{tr(lang, "Revenue today", "আজকের আয়")}</p></div>
-                <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{tk(revenue)}</b><p className="small">{tr(lang, "Total revenue (Completed / Delivered)", "মোট আয় (সম্পন্ন / ডেলিভার্ড)")}</p></div>
-                <div className="card" style={{ padding: 12, textAlign: "center" }}><b style={{ fontSize: 20 }}>{todayBest ? `${todayBest.name} × ${todayBest.qty}` : "—"}</b><p className="small">{tr(lang, "Best seller today", "আজকের সেরা বিক্রি")}</p></div>
+                <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => setTab("finance")}><b style={{ fontSize: 20 }}>{tk(todayRevenue)}</b><p className="small">{tr(lang, "Revenue today", "আজকের আয়")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
+                <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => setTab("finance")}><b style={{ fontSize: 20 }}>{tk(revenue)}</b><p className="small">{tr(lang, "Total revenue (Completed / Delivered)", "মোট আয় (সম্পন্ন / ডেলিভার্ড)")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
+                <button type="button" className="card" style={{ padding: 12, textAlign: "center", cursor: "pointer" }} onClick={() => setTab("analytics")}><b style={{ fontSize: 20 }}>{todayBest ? `${todayBest.name} × ${todayBest.qty}` : "—"}</b><p className="small">{tr(lang, "Best seller today", "আজকের সেরা বিক্রি")}</p><p className="small muted" style={{ margin: 0 }}>👆 {tr(lang, "Tap to view", "দেখতে চাপ দিন")}</p></button>
               </div>
             )}
             <div className="card" style={{ padding: 14, marginTop: 12, border: lowStock.length > 0 ? "2px solid var(--bad)" : undefined, background: lowStock.length > 0 ? "rgba(224,120,86,.08)" : undefined }}>
@@ -1712,7 +1726,7 @@ export function AdminPanel({ fbUser, authReady, userDoc, settings, categories, p
             </div>
           </div>
         )}
-        {activeTab === "orders" && <OrdersTab userDoc={userDoc} products={products} settings={settings} lang={lang} />}
+        {activeTab === "orders" && <OrdersTab userDoc={userDoc} products={products} settings={settings} lang={lang} filter={ordersFilter} onFilterChange={setOrdersFilter} />}
         {activeTab === "pos" && <PosTab userDoc={userDoc} products={products} settings={settings} lang={lang} />}
         {activeTab === "products" && <ProductsTab userDoc={userDoc} categories={categories} products={products} lang={lang} />}
         {activeTab === "reservations" && <ReservationsTab userDoc={userDoc} lang={lang} />}

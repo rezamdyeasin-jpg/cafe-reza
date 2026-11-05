@@ -27,8 +27,8 @@ import {
   type Category, type Coupon, type Lang, type Order, type Product, type Reservation,
   type Review, type Settings, type UserDoc,
 } from "./db";
-import { cancelOrderTx, COMBO_DISCOUNT_PER_LINE, COMBO_MIN_QTY, comboDiscount, HAPPY_HOUR_END, HAPPY_HOUR_PERCENT, HAPPY_HOUR_START, happyHourDiscount, isHappyHour, placeOrderTx, timeToMin, type CartLine } from "./orders";
-import { askAi, buildAiKnowledge } from "./aiAssistant";
+import { cancelOrderTx, COMBO_DISCOUNT_PER_LINE, COMBO_MIN_QTY, comboDiscount, HAPPY_HOUR_END, HAPPY_HOUR_PERCENT, HAPPY_HOUR_START, happyHourDiscount, isHappyHour, normalizeBdPhone, placeOrderTx, timeToMin, type CartLine } from "./orders";
+import { askAi, buildAiKnowledge, fetchWeatherNow, type WeatherNow } from "./aiAssistant";
 import { ReceiptModal } from "./Receipt";
 import { InstallAppCard } from "./InstallAppCard";
 import { AdminPanel } from "./AdminPanel";
@@ -627,9 +627,16 @@ function CartDrawer({ open, onClose, cart, setCart, products, settings, fbUser, 
       setErr(couponInfo.note || tr(lang, "The coupon code is not valid — remove it or check it again before ordering.", "কুপন কোডটি ঠিক নয় — অর্ডারের আগে সেটি সরান বা আবার যাচাই করুন।"));
       return;
     }
+    // The checkout phone must be a real Bangladeshi mobile number —
+    // a wrong or random number must not place an order.
+    const bdPhone = normalizeBdPhone(phone);
+    if (!bdPhone) {
+      setErr(tr(lang, "Enter a valid Bangladeshi mobile number (11 digits, starting with 01).", "সঠিক বাংলাদেশি মোবাইল নম্বর দিন (১১ অঙ্ক, 01 দিয়ে শুরু)।"));
+      return;
+    }
     setErr(""); setBusy(true);
     const r = await placeOrderTx({
-      uid: fbUser.uid, customerName: name.trim(), phone: phone.trim(), address: address.trim(),
+      uid: fbUser.uid, customerName: name.trim(), phone: bdPhone, address: address.trim(),
       orderType, source: "website", paymentMethod: payment, paymentRef: ref.trim(),
       tableLabel: orderType === "dine-in" ? tableLabel.trim() : "", notes: "", staffName: "",
       couponCode: coupon, lines, settings, paidAmount: 0, redeemBlocks,
@@ -1204,18 +1211,67 @@ class PanelErrorBoundary extends Component<{ children: ReactNode; lang: Lang; on
 // last-read time), because the rules do not let customers update
 // readFlag. The button sits bottom-left so it never covers the
 // bottom-right "View cart" button.
-function ChatBox({ fbUser, userDoc, products, settings, lang }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; settings: Settings; lang: Lang }) {
+// Compress a screenshot/photo for the chat: downscale to at most
+// 1024px on the long side and encode as JPEG (quality 0.7), so the
+// image stays small enough to store in a Firestore message document
+// (1 MB limit) and to send to the AI. Returns a base64 data URL.
+async function compressChatImage(file: File): Promise<string> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error("Could not read the image."));
+    r.readAsDataURL(file);
+  });
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error("Could not load the image."));
+    im.src = dataUrl;
+  });
+  const max = 1024;
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not process the image.");
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", 0.7);
+}
+
+// Find menu products named in an AI reply (English or Bengali name),
+// so the chat can show an "Add to cart" button for each suggestion.
+function mentionedProducts(text: string, products: Product[]): Product[] {
+  const t = text.toLowerCase();
+  const found: Product[] = [];
+  for (const p of products) {
+    if (!p.available || p.price <= 0) continue;
+    const en = p.nameEn.trim().toLowerCase();
+    const bn = p.nameBn.trim();
+    if ((en && t.includes(en)) || (bn && text.includes(bn))) found.push(p);
+    if (found.length >= 3) break;
+  }
+  return found;
+}
+
+function ChatBox({ fbUser, userDoc, products, settings, lang, onAddToCart }: { fbUser: User | null; userDoc: UserDoc | null; products: Product[]; settings: Settings; lang: Lang; onAddToCart: (p: Product) => void }) {
   const firestore = getDb();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiNote, setAiNote] = useState("");
+  const [weather, setWeather] = useState<WeatherNow | null>(null);
+  const greetedRef = useRef(false);
   const [lastRead, setLastRead] = useState(0);
+  const [imgData, setImgData] = useState("");
+  const [imgBusy, setImgBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const { data: messages } = useLive<{ id: string; author: string; authorName: string; body: string; createdAt: string }>(
+  const { data: messages } = useLive<{ id: string; author: string; authorName: string; body: string; imageData: string; createdAt: string }>(
     () => (firestore && fbUser ? query(collection(firestore, "messages"), where("userId", "==", fbUser.uid), orderBy("createdAt", "asc"), limit(100)) : null),
-    (id, d) => ({ id, author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), body: String(d.body ?? ""), createdAt: tsToIso(d.createdAt) }),
+    (id, d) => ({ id, author: String(d.author ?? ""), authorName: String(d.authorName ?? ""), body: String(d.body ?? ""), imageData: String(d.imageData ?? ""), createdAt: tsToIso(d.createdAt) }),
     [fbUser?.uid],
   );
   // The signed-in customer's own recent orders, so the AI can answer
@@ -1237,24 +1293,53 @@ function ChatBox({ fbUser, userDoc, products, settings, lang }: { fbUser: User |
     setLastRead(t);
   };
   useEffect(() => { if (open) markRead(); }, [open, messages]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Today's weather (Comilla) for food suggestions — fetched once.
+  useEffect(() => { let live = true; void fetchWeatherNow().then((w) => { if (live) setWeather(w); }); return () => { live = false; }; }, []);
+  // Proactive weather greeting: when the customer opens the chat and
+  // has no messages yet, the AI itself says hello with a suggestion
+  // that fits today's weather. Once per day per customer.
+  useEffect(() => {
+    if (!open || !fbUser || greetedRef.current || messages.length > 0) return;
+    const key = settings.geminiApiKey?.trim() ?? "";
+    if (!key) return;
+    let day = "";
+    try { day = localStorage.getItem(`cr_chat_greet_${fbUser.uid}`) ?? ""; } catch { /* best-effort */ }
+    const today = new Date().toISOString().slice(0, 10);
+    if (day === today) { greetedRef.current = true; return; }
+    greetedRef.current = true;
+    try { localStorage.setItem(`cr_chat_greet_${fbUser.uid}`, today); } catch { /* best-effort */ }
+    void (async () => {
+      setAiBusy(true);
+      const q = tr(lang, "Greet me warmly with a food suggestion that fits today's weather.", "আজকের আবহাওয়ার সাথে মানানসই একটা খাবারের পরামর্শ দিয়ে আমাকে উষ্ণভাবে শুভেচ্ছা জানাও।");
+      const r = await askAi(key, buildAiKnowledge(products, settings, myOrders, weather), [], q);
+      setAiBusy(false);
+      if (r.ok && r.text && firestore) {
+        await addDoc(collection(firestore, "messages"), { userId: fbUser.uid, guestName: "", guestPhone: "", orderNo: "", author: "ai", authorName: tr(lang, "AI Assistant", "AI সহকারী"), body: r.text, imageData: "", readFlag: false, createdAt: serverTimestamp() });
+      }
+    })();
+  }, [open, fbUser, messages.length]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (open && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [open, messages]);
   const unread = messages.filter((m) => (m.author === "staff" || m.author === "ai") && Date.parse(m.createdAt) > lastRead).length;
   const send = async () => {
-    if (!firestore || !fbUser || !draft.trim() || sending) return;
+    if (!firestore || !fbUser || sending) return;
     const text = draft.trim();
+    if (!text && !imgData) return;
     setDraft(""); setAiNote(""); setSending(true);
+    const img = imgData;
+    setImgData("");
     try {
-      await addDoc(collection(firestore, "messages"), { userId: fbUser.uid, guestName: userDoc?.name ?? "", guestPhone: userDoc?.phone ?? "", orderNo: "", author: "customer", authorName: userDoc?.name ?? "", body: text, readFlag: false, createdAt: serverTimestamp() });
+      await addDoc(collection(firestore, "messages"), { userId: fbUser.uid, guestName: userDoc?.name ?? "", guestPhone: userDoc?.phone ?? "", orderNo: "", author: "customer", authorName: userDoc?.name ?? "", body: text, imageData: img || "", readFlag: false, createdAt: serverTimestamp() });
       // AI reply (best-effort): the chat works with or without it.
+      // A screenshot goes to the AI too, so it can see the problem.
       const key = settings.geminiApiKey?.trim() ?? "";
       if (!key) {
         setAiNote(tr(lang, "AI is not set up yet — your message reached the admin.", "AI এখনো চালু হয়নি — আপনার মেসেজ অ্যাডমিনের কাছে পৌঁছেছে।"));
       } else {
         setAiBusy(true);
         const history = messages.filter((m) => m.author === "customer" || m.author === "ai").slice(-10).map((m) => ({ role: (m.author === "ai" ? "model" : "user") as "model" | "user", text: m.body }));
-        const r = await askAi(key, buildAiKnowledge(products, settings, myOrders), history, text);
+        const r = await askAi(key, buildAiKnowledge(products, settings, myOrders, weather), history, text || tr(lang, "Please look at this screenshot and help me.", "এই স্ক্রিনশটটা দেখে আমাকে সাহায্য করুন।"), img || undefined);
         setAiBusy(false);
         if (r.ok && r.text) {
           await addDoc(collection(firestore, "messages"), { userId: fbUser.uid, guestName: "", guestPhone: "", orderNo: "", author: "ai", authorName: tr(lang, "AI Assistant", "AI সহকারী"), body: r.text, readFlag: false, createdAt: serverTimestamp() });
@@ -1288,15 +1373,34 @@ function ChatBox({ fbUser, userDoc, products, settings, lang }: { fbUser: User |
                 {messages.map((m) => (
                   <div key={m.id} style={{ alignSelf: m.author === "customer" ? "flex-end" : "flex-start", maxWidth: "85%", background: m.author === "customer" ? "var(--gold)" : "var(--surface)", color: m.author === "customer" ? "#fff" : "inherit", borderRadius: 12, padding: "8px 10px" }}>
                     <span className="small" style={{ fontWeight: 700, opacity: 0.85 }}>{m.author === "ai" ? (<><img src="/img/logo.jpg" alt="" style={{ width: 18, height: 18, borderRadius: "50%", verticalAlign: "-4px", marginRight: 4 }} />{m.authorName}</>) : m.author === "staff" ? `🏪 ${m.authorName || tr(lang, "Café Reza", "ক্যাফে রেজা")}` : tr(lang, "You", "আপনি")}</span>
-                    <p style={{ margin: "2px 0 0", fontSize: 14, whiteSpace: "pre-wrap" }}>{m.body}</p>
+                    {m.imageData && <img src={m.imageData} alt="" style={{ display: "block", maxWidth: "100%", borderRadius: 8, marginTop: 6 }} />}
+                    {m.body && <p style={{ margin: "2px 0 0", fontSize: 14, whiteSpace: "pre-wrap" }}>{m.body}</p>}
+                    {m.author === "ai" && m.body && mentionedProducts(m.body, products).map((p) => (
+                      <button key={p.id} type="button" className="btn-gold" onClick={() => onAddToCart(p)} style={{ marginTop: 6, marginRight: 6, padding: "6px 10px", fontSize: 13 }}>🛒 {lang === "bn" ? p.nameBn : p.nameEn} ৳{p.price} — {tr(lang, "Add to cart", "কার্টে যোগ করুন")}</button>
+                    ))}
                   </div>
                 ))}
                 {aiBusy && <p className="small muted">{tr(lang, "AI is writing…", "AI লিখছে…")}</p>}
               </div>
               {aiNote && <p className="small" role="status" style={{ margin: "0 12px 6px", color: "var(--bad)" }}>{aiNote}</p>}
+              {imgData && (
+                <div style={{ margin: "0 12px 6px", position: "relative", display: "inline-block" }}>
+                  <img src={imgData} alt="" style={{ maxWidth: 160, borderRadius: 8, display: "block" }} />
+                  <button type="button" aria-label={tr(lang, "Remove image", "ছবি সরান")} onClick={() => setImgData("")} style={{ position: "absolute", top: -8, right: -8, width: 22, height: 22, borderRadius: "50%", border: "none", background: "var(--bad)", color: "#fff", fontSize: 12, cursor: "pointer" }}>✕</button>
+                </div>
+              )}
               <div className="row" style={{ padding: 10, borderTop: "1px solid var(--border)" }}>
+                <input ref={fileRef} type="file" accept="image/*" hidden onChange={async (e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!f) return;
+                  setImgBusy(true);
+                  try { setImgData(await compressChatImage(f)); } catch { setAiNote(tr(lang, "Could not read that image. Try another one.", "ছবিটা পড়া যায়নি। অন্য একটা চেষ্টা করুন।")); }
+                  setImgBusy(false);
+                }} />
+                <button type="button" className="btn-ghost" aria-label={tr(lang, "Send a screenshot", "স্ক্রিনশট পাঠান")} disabled={imgBusy} onClick={() => fileRef.current?.click()} style={{ padding: "6px 10px", fontSize: 18 }}>📷</button>
                 <input aria-label={tr(lang, "Write a message", "মেসেজ লিখুন")} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void send(); }} placeholder={tr(lang, "Write a message…", "মেসেজ লিখুন…")} style={{ flex: 1 }} />
-                <button className="btn-gold" disabled={sending || !draft.trim()} onClick={() => void send()}>{sending ? "…" : tr(lang, "Send", "পাঠান")}</button>
+                <button className="btn-gold" disabled={sending || (!draft.trim() && !imgData)} onClick={() => void send()}>{sending ? "…" : tr(lang, "Send", "পাঠান")}</button>
               </div>
             </>
           )}
@@ -1656,7 +1760,7 @@ export function App() {
         <button onClick={() => navigate("track")}>📦 {tr(lang, "Track", "ট্র্যাক")}</button>
         <button onClick={() => navigate("account")}>👤 {tr(lang, "Account", "অ্যাকাউন্ট")}</button>
       </nav>)}
-      {view !== "admin" && <ChatBox fbUser={fbUser} userDoc={userDoc} products={products} settings={settings} lang={lang} />}
+      {view !== "admin" && <ChatBox fbUser={fbUser} userDoc={userDoc} products={products} settings={settings} lang={lang} onAddToCart={(p) => addToCart(p)} />}
       {/* No floating admin button on customer pages: the customer app
           carries no admin trace. Staff reach the panel via #/admin. */}
       {cart.length > 0 && view === "store" && !cartOpen && (
